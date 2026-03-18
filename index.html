@@ -341,6 +341,9 @@ function renderList(c) {
 function setFilter(f) { filterStatut = f; render(); }
 
 function openChantier(id) {
+  // Recharger depuis localStorage pour avoir les dernières photos
+  const saved = localStorage.getItem('jardinator_chantiers');
+  if (saved) chantiers = JSON.parse(saved);
   currentChantier = chantiers.find(c=>c.id===id);
   photos = [...(currentChantier.photos||[])];
   sigData = currentChantier.signature;
@@ -490,6 +493,11 @@ function handleFiles(files) {
         updatePhotoGridNouveau();
       } else {
         photos.push(ev.target.result);
+        // Sauvegarder immédiatement dans le chantier et localStorage
+        if (currentChantier) {
+          currentChantier.photos = [...photos];
+          saveChantiers();
+        }
         updatePhotoGrid();
       }
     };
