@@ -487,18 +487,37 @@ function handleFiles(files) {
   const isNouveau = window._photoTarget === 'nouveau' || (!currentChantier && activeTab === 'nouveau');
   Array.from(files).forEach(f => {
     const reader = new FileReader();
-    reader.onload = ev => {
+    reader.onload = async ev => {
+      const base64 = ev.target.result;
       if (isNouveau) {
-        photosNouveau.push(ev.target.result);
+        photosNouveau.push(base64);
         updatePhotoGridNouveau();
       } else {
-        photos.push(ev.target.result);
-        // Sauvegarder immédiatement dans le chantier et localStorage
-        if (currentChantier) {
-          currentChantier.photos = [...photos];
-          saveChantiers();
-        }
+        // Afficher d'abord en local
+        photos.push(base64);
         updatePhotoGrid();
+        // Uploader immédiatement sur Drive
+        if (currentChantier) {
+          try {
+            const token = await getGDriveToken();
+            if (token) {
+              const folderId = await getOrCreateFolder(token);
+              const idx = photos.length - 1;
+              const driveUrl = await uploadPhotoToDrive(base64, `${currentChantier.id}_photo_${Date.now()}.jpg`, token, folderId);
+              photos[idx] = driveUrl;
+              currentChantier.photos = [...photos];
+              saveChantiers();
+              updatePhotoGrid();
+            }
+          } catch(e) {
+            console.log('Drive upload error:', e);
+            // Garder en local si Drive échoue
+            if (currentChantier) {
+              currentChantier.photos = [...photos];
+              saveChantiers();
+            }
+          }
+        }
       }
     };
     reader.readAsDataURL(f);
@@ -507,11 +526,37 @@ function handleFiles(files) {
 }
 
 document.getElementById('fileInputCamera').addEventListener('change', e => {
-  handleFiles(e.target.files); e.target.value = '';
+  if (e.target.files.length > 0) handleFiles(e.target.files);
+  e.target.value = '';
 });
 document.getElementById('fileInputGallery').addEventListener('change', e => {
-  handleFiles(e.target.files); e.target.value = '';
+  if (e.target.files.length > 0) handleFiles(e.target.files);
+  e.target.value = '';
 });
+
+// Sauvegarder l'état avant de quitter l'app pour prendre une photo
+document.getElementById('fileInputCamera').addEventListener('click', () => {
+  if (currentChantier) sessionStorage.setItem('lastChantierID', currentChantier.id);
+});
+document.getElementById('fileInputGallery').addEventListener('click', () => {
+  if (currentChantier) sessionStorage.setItem('lastChantierID', currentChantier.id);
+});
+
+// Restaurer l'état si l'app a été rechargée pendant la prise de photo
+const lastID = sessionStorage.getItem('lastChantierID');
+if (lastID) {
+  sessionStorage.removeItem('lastChantierID');
+  const saved = localStorage.getItem('jardinator_chantiers');
+  if (saved) {
+    chantiers = JSON.parse(saved);
+    const ch = chantiers.find(c => c.id === lastID);
+    if (ch) {
+      currentChantier = ch;
+      photos = [...(ch.photos || [])];
+      sigData = ch.signature;
+    }
+  }
+}
 
 async function syncToSheets(ch) {
   if (!SHEETS_WEBHOOK_URL || SHEETS_WEBHOOK_URL === 'VOTRE_URL_APPS_SCRIPT_ICI') return false;
