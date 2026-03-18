@@ -590,7 +590,7 @@
       // CONFIGURATION — REMPLACEZ PAR VOTRE URL GOOGLE APPS SCRIPT
       // ============================================================
       const SHEETS_WEBHOOK_URL =
-        "https://script.google.com/macros/s/AKfycbyhH1JuJ_hx8WDhOYtgdTTwdJ8_FO8XnghA6zenEDk6BGDACXdC2k7eD7BOsKi8xYaqDQ/exec";
+        "https://script.google.com/macros/s/AKfycbxyLMTobrCcGSKJ_-YBaQhFl-5yD2r3AqxWyFFo74VYwxQ6fl-BjCsAVVA8aMtPifS9/exec";
       const GDRIVE_CLIENT_ID =
         "106760513182-7m8qtbgnhh0t6t7g4as0rbfpund9r89a.apps.googleusercontent.com";
       const GDRIVE_FOLDER_NAME = "Jardinator Photos";
@@ -738,7 +738,7 @@
         if (
           !SHEETS_WEBHOOK_URL ||
           SHEETS_WEBHOOK_URL ===
-            "https://script.google.com/macros/s/AKfycbyhH1JuJ_hx8WDhOYtgdTTwdJ8_FO8XnghA6zenEDk6BGDACXdC2k7eD7BOsKi8xYaqDQ/exec"
+            "https://script.google.com/macros/s/AKfycbxyLMTobrCcGSKJ_-YBaQhFl-5yD2r3AqxWyFFo74VYwxQ6fl-BjCsAVVA8aMtPifS9/exec"
         ) {
           const saved = localStorage.getItem("jardinator_chantiers");
           chantiers = saved ? JSON.parse(saved) : [];
@@ -909,7 +909,7 @@
         if (
           SHEETS_WEBHOOK_URL &&
           SHEETS_WEBHOOK_URL !==
-            "https://script.google.com/macros/s/AKfycbyhH1JuJ_hx8WDhOYtgdTTwdJ8_FO8XnghA6zenEDk6BGDACXdC2k7eD7BOsKi8xYaqDQ/exec"
+            "https://script.google.com/macros/s/AKfycbxyLMTobrCcGSKJ_-YBaQhFl-5yD2r3AqxWyFFo74VYwxQ6fl-BjCsAVVA8aMtPifS9/exec"
         ) {
           try {
             await fetch(SHEETS_WEBHOOK_URL, {
@@ -1122,7 +1122,7 @@
         if (
           !SHEETS_WEBHOOK_URL ||
           SHEETS_WEBHOOK_URL ===
-            "https://script.google.com/macros/s/AKfycbyhH1JuJ_hx8WDhOYtgdTTwdJ8_FO8XnghA6zenEDk6BGDACXdC2k7eD7BOsKi8xYaqDQ/exec"
+            "https://script.google.com/macros/s/AKfycbxyLMTobrCcGSKJ_-YBaQhFl-5yD2r3AqxWyFFo74VYwxQ6fl-BjCsAVVA8aMtPifS9/exec"
         )
           return false;
         try {
@@ -1301,7 +1301,7 @@
         const pct = total ? Math.round((done / total) * 100) : 0;
         const sheetConfigured =
           SHEETS_WEBHOOK_URL !==
-          "https://script.google.com/macros/s/AKfycbyhH1JuJ_hx8WDhOYtgdTTwdJ8_FO8XnghA6zenEDk6BGDACXdC2k7eD7BOsKi8xYaqDQ/exec";
+          "https://script.google.com/macros/s/AKfycbxyLMTobrCcGSKJ_-YBaQhFl-5yD2r3AqxWyFFo74VYwxQ6fl-BjCsAVVA8aMtPifS9/exec";
         c.innerHTML = `
     <div style="font-size:20px;font-weight:700;color:var(--noir);margin-bottom:16px">Tableau de bord</div>
     <div class="stat-row">
