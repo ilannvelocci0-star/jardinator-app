@@ -1084,12 +1084,6 @@
       }
 
       render();
-
-      if ("serviceWorker" in navigator) {
-        navigator.serviceWorker
-          .register("/jardinator-app/sw.js")
-          .catch(() => {});
-      }
     </script>
   </body>
 </html>
