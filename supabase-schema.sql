@@ -28,9 +28,19 @@ create table if not exists public.chantiers (
   -- « cle » est l'identifiant local de l'appareil qui a pris la photo :
   -- il lui permet de réutiliser sa vignette au lieu de la retélécharger.
   photos         jsonb not null default '[]'::jsonb,
+  -- Ouvrier affecté au chantier. Un ouvrier ne voit que ses chantiers ;
+  -- une fiche non affectée n'est visible que du patron.
+  assigne_a      uuid references auth.users (id) on delete set null,
   cree_le        timestamptz not null default now(),
   maj_le         timestamptz not null default now()
 );
+
+-- Colonne ajoutée après coup : permet de rejouer ce fichier sur une base
+-- déjà créée sans repartir de zéro.
+alter table public.chantiers
+  add column if not exists assigne_a uuid references auth.users (id) on delete set null;
+
+create index if not exists chantiers_assigne_idx on public.chantiers (assigne_a);
 
 create index if not exists chantiers_statut_idx on public.chantiers (statut);
 create index if not exists chantiers_maj_idx    on public.chantiers (maj_le desc);
@@ -53,15 +63,66 @@ create trigger chantiers_touch
 -- ----------------------------------------------------------------
 alter table public.chantiers enable row level security;
 
--- Aucun accès anonyme. Seuls les comptes créés dans
--- Authentication > Users peuvent lire et écrire.
+-- Le rôle est lu dans app_metadata, PAS dans user_metadata : un
+-- utilisateur peut modifier lui-même son user_metadata via l'API et
+-- s'auto-promouvoir. app_metadata n'est modifiable qu'en SQL ou avec la
+-- clé de service.
+create or replace function public.est_patron()
+returns boolean language sql stable as $$
+  select coalesce(auth.jwt() -> 'app_metadata' ->> 'role', 'ouvrier') = 'patron'
+$$;
+
 drop policy if exists "chantiers authentifies" on public.chantiers;
-create policy "chantiers authentifies"
-  on public.chantiers
-  for all
-  to authenticated
-  using (true)
-  with check (true);
+drop policy if exists "chantiers lecture"      on public.chantiers;
+drop policy if exists "chantiers creation"     on public.chantiers;
+drop policy if exists "chantiers modification" on public.chantiers;
+drop policy if exists "chantiers suppression"  on public.chantiers;
+
+-- Le patron voit tout. L'ouvrier ne voit QUE les chantiers qui lui sont
+-- affectés — le filtrage est fait ici, par la base : impossible de voir
+-- les chantiers d'un collègue en trafiquant l'application.
+create policy "chantiers lecture" on public.chantiers
+  for select to authenticated
+  using (public.est_patron() or assigne_a = auth.uid());
+
+-- Même périmètre en écriture : notes, statut et signature de fin de
+-- chantier, uniquement sur ses propres chantiers.
+create policy "chantiers modification" on public.chantiers
+  for update to authenticated
+  using (public.est_patron() or assigne_a = auth.uid())
+  with check (public.est_patron() or assigne_a = auth.uid());
+
+-- Créer et supprimer une fiche client reste au patron. Une fausse manip
+-- d'un ouvrier ne doit pas effacer un chantier facturé.
+create policy "chantiers creation" on public.chantiers
+  for insert to authenticated with check (public.est_patron());
+
+create policy "chantiers suppression" on public.chantiers
+  for delete to authenticated using (public.est_patron());
+
+-- ----------------------------------------------------------------
+-- L'équipe, pour le menu déroulant « Assigné à »
+-- ----------------------------------------------------------------
+-- La table auth.users n'est pas interrogeable depuis l'app. Cette vue
+-- n'expose que le strict nécessaire : identifiant, prénom et rôle.
+-- Ni mot de passe, ni jeton, ni e-mail, ni date de connexion.
+--
+-- Elle tourne volontairement avec les droits de son propriétaire
+-- (security definer, le défaut) : « authenticated » n'a aucun droit sur
+-- auth.users, donc en security_invoker la vue échouerait pour tout le
+-- monde. C'est ce qui rend le choix des colonnes ci-dessous important.
+create or replace view public.equipe as
+select
+  u.id,
+  coalesce(
+    nullif(u.raw_user_meta_data ->> 'nom', ''),
+    initcap(split_part(u.email, '@', 1))
+  ) as nom,
+  coalesce(u.raw_app_meta_data ->> 'role', 'ouvrier') as role
+from auth.users u;
+
+revoke all on public.equipe from anon;
+grant select on public.equipe to authenticated;
 
 -- ----------------------------------------------------------------
 -- Stockage des photos, signatures et devis
@@ -89,3 +150,40 @@ create policy "fichiers maj" on storage.objects
 
 create policy "fichiers suppression" on storage.objects
   for delete to authenticated using (bucket_id = 'jardinator');
+
+-- ================================================================
+-- À LANCER APRÈS AVOIR CRÉÉ LES COMPTES
+-- ================================================================
+-- Remplacez les adresses par les vraies, puis exécutez ce bloc seul
+-- (sélectionnez-le et faites Run).
+--
+-- Sans ça, TOUT LE MONDE est ouvrier — y compris Lucas, qui ne pourrait
+-- alors ni créer ni supprimer de chantier.
+-- ----------------------------------------------------------------
+
+-- Le patron
+update auth.users
+   set raw_app_meta_data = coalesce(raw_app_meta_data, '{}'::jsonb) || '{"role":"patron"}'::jsonb
+ where email in ('lucas@example.fr');          -- <== l'adresse de Lucas
+
+-- Les ouvriers
+update auth.users
+   set raw_app_meta_data = coalesce(raw_app_meta_data, '{}'::jsonb) || '{"role":"ouvrier"}'::jsonb
+ where email in ('axel@example.fr', 'bastien@example.fr',
+                 'valentin@example.fr', 'moussa@example.fr');
+
+-- Prénoms affichés dans le menu « Assigné à ». Facultatif : sans ça,
+-- c'est la partie avant le @ de l'adresse qui est utilisée.
+update auth.users set raw_user_meta_data =
+       coalesce(raw_user_meta_data, '{}'::jsonb) || jsonb_build_object('nom', v.nom)
+  from (values
+    ('lucas@example.fr',    'Lucas'),
+    ('axel@example.fr',     'Axel'),
+    ('bastien@example.fr',  'Bastien'),
+    ('valentin@example.fr', 'Valentin'),
+    ('moussa@example.fr',   'Moussa')
+  ) as v(mail, nom)
+ where auth.users.email = v.mail;
+
+-- Vérification : doit lister 1 patron et 4 ouvriers.
+-- select nom, role from public.equipe order by role, nom;

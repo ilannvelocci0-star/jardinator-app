@@ -136,7 +136,7 @@ canvas#sigCanvas{position:absolute;top:0;left:0;width:100%;height:100%}
     </div>
     <div style="display:flex;align-items:center;gap:8px">
       <div id="refresh-btn" onclick="loadFromSheets(false)" style="background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);padding:6px 10px;border-radius:20px;font-size:18px;cursor:pointer;" title="Rafraîchir">🔄</div>
-      <div class="role-btn" onclick="toggleRole()"><span id="role-label">Vue Bureau</span></div>
+      <div class="role-btn" style="cursor:default"><span id="role-label">Vue Bureau</span></div>
     </div>
   </div>
   <div class="tab-bar" id="tab-bar">
@@ -165,7 +165,22 @@ const BUCKET = 'jardinator';
 
 const CONFIGURED = SUPABASE_URL.indexOf('COLLEZ_ICI') === -1;
 
-let role = localStorage.getItem('jardinator_role') || 'bureau';
+// Le rôle vient du compte, plus d'un interrupteur : un ouvrier ne peut
+// plus basculer en vue bureau. Il est lu dans app_metadata, que
+// l'utilisateur ne peut pas modifier lui-même.
+function estPatron() {
+  return !!(session && session.user && session.user.app_metadata
+            && session.user.app_metadata.role === 'patron');
+}
+function prenomConnecte() {
+  const u = session && session.user;
+  if (!u) return '';
+  if (u.user_metadata && u.user_metadata.nom) return u.user_metadata.nom;
+  const l = (u.email || '').split('@')[0];
+  return l ? l.charAt(0).toUpperCase() + l.slice(1) : '';
+}
+
+let equipe = [];   // [{id, nom, role}] — rempli à la connexion, pour le patron
 let activeTab = 'chantiers', filterStatut = 'tous';
 let currentChantier = null, sigData = null;
 let sigDrawing = false, sigCtx = null, sigLast = null;
@@ -307,13 +322,14 @@ function versApp(r) {
     // Le dataURL de la signature n'est jamais transporté : 'signed'
     // indique « signée, image à télécharger si besoin ».
     signature: r.signature_path ? 'signed' : null,
+    assigneA: r.assigne_a || null,
     photos: Array.isArray(r.photos) ? r.photos : [],
     nbPhotos: Array.isArray(r.photos) ? r.photos.length : 0
   };
 }
 
 function versDb(ch) {
-  return {
+  const d = {
     id: ch.id, statut: ch.statut || 'À faire',
     client: ch.client || '', adresse: ch.adresse || '',
     devis: ch.devis === '—' ? '' : (ch.devis || ''),
@@ -321,6 +337,10 @@ function versDb(ch) {
     date_prevue: ch.date || '',
     date_termine: ch.statut === 'Terminé' ? (ch.dateTermine || todayFr()) : ''
   };
+  // Seul le patron affecte. Un ouvrier qui enverrait ce champ verrait sa
+  // requête rejetée par la base — autant ne pas l'envoyer du tout.
+  if (estPatron()) d.assigne_a = ch.assigneA || null;
+  return d;
 }
 
 function todayFr() { return new Date().toLocaleDateString('fr-FR'); }
@@ -692,23 +712,36 @@ function showLoader() {
 // NAVIGATION
 // ============================================================
 
-document.getElementById('role-label').textContent = role === 'bureau' ? 'Vue Bureau' : 'Vue Terrain';
+// L'interface se cale sur le compte connecté, une fois pour toutes.
+function appliquerRole() {
+  const patron = estPatron();
+  document.getElementById('role-label').textContent = patron ? 'Vue Bureau' : 'Vue Terrain';
+  document.getElementById('topbar-sub').textContent = patron
+    ? 'Gestion des interventions'
+    : 'Mes chantiers — ' + prenomConnecte();
 
-function toggleRole() {
-  role = role === 'bureau' ? 'terrain' : 'bureau';
-  localStorage.setItem('jardinator_role', role);
-  document.getElementById('role-label').textContent = role === 'bureau' ? 'Vue Bureau' : 'Vue Terrain';
-  document.getElementById('topbar-sub').textContent = role === 'bureau' ? 'Gestion des interventions' : 'Mes chantiers du jour';
-  const tabs = document.getElementById('tab-bar');
-  if (role === 'terrain') {
-    tabs.innerHTML = '<div class="tab active" id="tab-chantiers" onclick="switchTab(\'chantiers\')">Mes chantiers</div>';
-  } else {
-    tabs.innerHTML = '<div class="tab active" id="tab-chantiers" onclick="switchTab(\'chantiers\')">Chantiers</div>' +
+  document.getElementById('tab-bar').innerHTML = patron
+    ? '<div class="tab active" id="tab-chantiers" onclick="switchTab(\'chantiers\')">Chantiers</div>' +
       '<div class="tab" id="tab-nouveau" onclick="switchTab(\'nouveau\')">+ Nouveau</div>' +
-      '<div class="tab" id="tab-stats" onclick="switchTab(\'stats\')">Dashboard</div>';
-  }
+      '<div class="tab" id="tab-stats" onclick="switchTab(\'stats\')">Dashboard</div>'
+    : '<div class="tab active" id="tab-chantiers" onclick="switchTab(\'chantiers\')">Mes chantiers</div>' +
+      '<div class="tab" id="tab-stats" onclick="switchTab(\'stats\')">Mon compte</div>';
+
+  activeTab = 'chantiers';
   filterStatut = 'tous';
-  currentChantier = null; activeTab = 'chantiers'; render();
+}
+
+// Liste des ouvriers pour le menu « Assigné à ». Inutile côté terrain.
+async function chargerEquipe() {
+  if (!estPatron()) return;
+  try {
+    equipe = (await sbJson('/rest/v1/equipe?select=id,nom,role&order=nom')) || [];
+  } catch (e) { equipe = []; }
+}
+
+function nomDe(id) {
+  const m = equipe.find(u => u.id === id);
+  return m ? m.nom : (id ? 'Ouvrier inconnu' : 'Non assigné');
 }
 
 function switchTab(tab) {
@@ -741,13 +774,16 @@ function badgeHtml(s) {
 // ============================================================
 
 function renderList(c) {
-  // Vue terrain : « En cours » doit rester visible, sinon un chantier
-  // démarré disparaît de l'écran de l'ouvrier qui le fait.
-  const list = role === 'terrain'
-    ? chantiers.filter(ch => ch.statut === 'À faire' || ch.statut === 'En cours')
-    : (filterStatut === 'tous' ? chantiers : chantiers.filter(ch => ch.statut === filterStatut));
+  const patron = estPatron();
 
-  const chips = role === 'bureau'
+  // Côté terrain, la base ne renvoie déjà que les chantiers de l'ouvrier.
+  // On filtre en plus sur le statut : « En cours » doit rester visible,
+  // sinon un chantier démarré disparaît de l'écran de celui qui le fait.
+  const list = patron
+    ? (filterStatut === 'tous' ? chantiers : chantiers.filter(ch => ch.statut === filterStatut))
+    : chantiers.filter(ch => ch.statut === 'À faire' || ch.statut === 'En cours');
+
+  const chips = patron
     ? '<div class="chips">' + ['tous', 'À faire', 'En cours', 'Terminé'].map(s =>
         '<div class="chip ' + (filterStatut === s ? 'active' : '') + '" onclick="setFilter(\'' + esc(s) + '\')">' +
         (s === 'tous' ? 'Tous' : esc(s)) + '</div>').join('') + '</div>'
@@ -758,6 +794,11 @@ function renderList(c) {
     '<div class="card" data-id="' + esc(ch.id) + '">' +
       '<div class="card-header"><div class="card-name">' + esc(ch.client) + '</div>' + badgeHtml(ch.statut) + '</div>' +
       '<div class="card-address">📍 ' + esc(ch.adresse) + '</div>' +
+      // Le patron a besoin de voir d'un coup d'œil qui est sur quoi.
+      (patron
+        ? '<div style="font-size:12px;color:' + (ch.assigneA ? 'var(--blue)' : '#c0392b') + ';margin-bottom:6px">' +
+          (ch.assigneA ? '👷 ' + esc(nomDe(ch.assigneA)) : '⚠ Non assigné') + '</div>'
+        : '') +
       '<div style="display:flex;justify-content:space-between;align-items:center">' +
         '<span style="font-size:12px;color:#999">' + esc(ch.id) + ' · ' + esc(ch.date) +
         (pending.has(ch.id) ? ' · ⏳' : '') + '</span>' +
@@ -768,10 +809,10 @@ function renderList(c) {
   if (!list.length) {
     cards = '<div class="empty-state"><div style="font-size:48px;margin-bottom:12px">🌹</div>' +
       '<div style="font-size:16px;font-weight:500">Aucun chantier</div>' +
-      (role === 'terrain' ? '<div style="font-size:14px;margin-top:6px">Pas de chantier à faire aujourd\'hui</div>' : '') + '</div>';
+      (!patron ? '<div style="font-size:14px;margin-top:6px">Aucun chantier ne t\'est assigné pour le moment</div>' : '') + '</div>';
   }
 
-  const title = role === 'terrain' ? "Chantiers à faire aujourd'hui" : 'Tous les chantiers';
+  const title = patron ? 'Tous les chantiers' : "Mes chantiers à faire";
   c.innerHTML = '<div class="section-title">' + title + ' (' + list.length + ')</div>' + chips + cards;
 }
 
@@ -814,6 +855,17 @@ function renderDetail(c) {
       '<div><div class="detail-main">' + esc(ch.adresse) + '</div><div class="detail-sub">Adresse d\'intervention</div></div>' +
     '</div>' +
     '<button class="gps-btn" onclick="openGPS()">🗺 Naviguer vers ce chantier</button>' +
+    // Affectation : menu déroulant pour le patron, simple information
+    // pour l'ouvrier — qui ne voit de toute façon que ses chantiers.
+    (estPatron()
+      ? '<div class="field-group" style="margin-top:12px"><div class="field-label">👷 Ouvrier assigné</div>' +
+        '<select class="field-input" id="assigne-select" onchange="changerAssignation(this.value)">' +
+          '<option value=""' + (ch.assigneA ? '' : ' selected') + '>— Non assigné —</option>' +
+          equipe.filter(u => u.role !== 'patron').map(u =>
+            '<option value="' + esc(u.id) + '"' + (ch.assigneA === u.id ? ' selected' : '') + '>' +
+            esc(u.nom) + '</option>').join('') +
+        '</select><div class="draft-note" id="assigne-note"></div></div>'
+      : '') +
     (ch.consignes
       ? '<div class="detail-row"><div class="detail-icon" style="background:var(--rouge-light)">⚠</div>' +
         '<div><div class="detail-main" style="color:var(--rouge-dark)">' + esc(ch.consignes) + '</div>' +
@@ -867,6 +919,20 @@ function renderDetail(c) {
 }
 
 function quitterFiche() { saveNotesDraft(); currentChantier = null; render(); }
+
+// Le patron affecte un ouvrier. Enregistré localement puis envoyé via la
+// file : pas d'attente réseau, et ça marche depuis un chantier sans 4G.
+function changerAssignation(id) {
+  if (!currentChantier) return;
+  currentChantier.assigneA = id || null;
+  saveChantiers();
+  syncChantier(currentChantier);
+  const n = document.getElementById('assigne-note');
+  if (n) {
+    n.textContent = id ? '✓ Assigné à ' + nomDe(id) : '✓ Assignation retirée';
+    setTimeout(() => { if (n) n.textContent = ''; }, 2000);
+  }
+}
 
 // Sauvegarde à la frappe. Sans ça, tout ce qui est tapé ne vit que dans
 // le DOM : mise en veille du téléphone, appel entrant ou changement
@@ -1232,6 +1298,12 @@ function renderNouveau(c) {
       '<input class="field-input" id="n-adresse" placeholder="Ex : 12 Rue des Érables, 69003 Lyon" autocomplete="street-address" value="' + esc(d['n-adresse'] || '') + '"></div>' +
     '<div class="field-group"><div class="field-label">Date prévue</div>' +
       '<input class="field-input" type="date" id="n-date" value="' + esc(d['n-date'] || today) + '"></div>' +
+    '<div class="field-group"><div class="field-label">👷 Assigner à</div>' +
+      '<select class="field-input" id="n-assigne">' +
+        '<option value="">— Non assigné —</option>' +
+        equipe.filter(u => u.role !== 'patron').map(u =>
+          '<option value="' + esc(u.id) + '">' + esc(u.nom) + '</option>').join('') +
+      '</select></div>' +
     '<div class="field-group"><div class="field-label">Statut</div>' +
       '<select class="field-input" id="n-statut">' +
         '<option' + (enCours ? '' : ' selected') + '>À faire</option>' +
@@ -1302,6 +1374,7 @@ function creerChantier() {
     devisCle: devisNouveau ? devisNouveau.cle : null,
     consignes: document.getElementById('n-consignes').value,
     notes: '', signature: null,
+    assigneA: document.getElementById('n-assigne') ? (document.getElementById('n-assigne').value || null) : null,
     photos: photosNouveau.slice(),
     nbPhotos: photosNouveau.length,
     date: document.getElementById('n-date').value,
@@ -1379,11 +1452,12 @@ function reinitialiser() {
 function demarrer() {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app').style.display = 'block';
+  appliquerRole();
   chantiers = loadLocal();   // affichage immédiat, sans attendre le réseau
   render();
   updateQueueBanner();
   flushQueue();
-  loadFromSheets(true);
+  chargerEquipe().then(() => loadFromSheets(true));
 }
 
 async function connexion() {
