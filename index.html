@@ -109,16 +109,17 @@ canvas#sigCanvas{position:absolute;top:0;left:0;width:100%;height:100%}
   <div style="font-size:22px;font-weight:700;color:white;letter-spacing:0.05em;margin-bottom:6px">JARDINATOR</div>
   <div style="font-size:13px;color:#888;margin-bottom:32px">Gestion des interventions</div>
   <div style="width:100%;max-width:320px">
-    <input type="password" id="pwd-input" placeholder="Mot de passe"
+    <input type="email" id="mail-input" placeholder="Adresse e-mail" autocomplete="username"
+      style="width:100%;padding:14px 16px;border:1.5px solid #333;border-radius:12px;font-size:16px;background:#2C2C2C;color:white;font-family:inherit;margin-bottom:10px;-webkit-appearance:none"
+      onkeydown="if(event.key==='Enter') document.getElementById('pwd-input').focus()">
+    <input type="password" id="pwd-input" placeholder="Mot de passe" autocomplete="current-password"
       style="width:100%;padding:14px 16px;border:1.5px solid #333;border-radius:12px;font-size:16px;background:#2C2C2C;color:white;font-family:inherit;margin-bottom:12px;-webkit-appearance:none"
-      onkeydown="if(event.key==='Enter') checkPassword()">
-    <button onclick="checkPassword()"
+      onkeydown="if(event.key==='Enter') connexion()">
+    <button id="btn-login" onclick="connexion()"
       style="width:100%;padding:16px;background:#C0392B;color:white;border:none;border-radius:12px;font-size:16px;font-weight:700;cursor:pointer">
-      Accéder à l'app
+      Se connecter
     </button>
-    <div id="pwd-error" style="color:#E74C3C;font-size:13px;text-align:center;margin-top:10px;display:none">
-      Mot de passe incorrect
-    </div>
+    <div id="pwd-error" style="color:#E74C3C;font-size:13px;text-align:center;margin-top:10px;display:none"></div>
   </div>
 </div>
 
@@ -151,12 +152,18 @@ canvas#sigCanvas{position:absolute;top:0;left:0;width:100%;height:100%}
 // ============================================================
 // CONFIGURATION
 // ============================================================
-const SHEETS_WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycbxyLMTobrCcGSKJ_-YBaQhFl-5yD2r3AqxWyFFo74VYwxQ6fl-BjCsAVVA8aMtPifS9/exec';
-const API_TOKEN = ''; // Doit correspondre à API_TOKEN dans apps-script-jardinator.gs
-const APP_PASSWORD = 'Jardibinks2026';
+// Supabase > Project Settings > API
+const SUPABASE_URL = 'https://xpjsumcttpntlwawrujr.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_eTNwmTB1KwCS5hqaT9klkw_RE6y2hx0';
+const BUCKET = 'jardinator';
+//
+// La clé ci-dessus est publique par conception : elle est visible dans
+// cette page. Ce qui protège les données, ce sont les règles RLS de
+// supabase-schema.sql — sans compte utilisateur valide, l'API ne renvoie
+// rien. Ne jamais mettre ici la clé « secret » / service_role.
 // ============================================================
 
-const CONFIGURED = !!SHEETS_WEBHOOK_URL && SHEETS_WEBHOOK_URL.indexOf('VOTRE_URL') === -1;
+const CONFIGURED = SUPABASE_URL.indexOf('COLLEZ_ICI') === -1;
 
 let role = localStorage.getItem('jardinator_role') || 'bureau';
 let activeTab = 'chantiers', filterStatut = 'tous';
@@ -177,19 +184,143 @@ function esc(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-function apiUrl(params) {
-  const q = new URLSearchParams(Object.assign({ token: API_TOKEN }, params || {}));
-  return SHEETS_WEBHOOK_URL + '?' + q.toString();
+// ============================================================
+// SESSION
+// ============================================================
+
+let session = null;
+try { session = JSON.parse(localStorage.getItem('jardinator_session') || 'null'); } catch (e) {}
+
+function setSession(s) {
+  session = s;
+  if (s) localStorage.setItem('jardinator_session', JSON.stringify(s));
+  else localStorage.removeItem('jardinator_session');
 }
 
-// Content-Type text/plain : une requête « simple » au sens CORS, donc
-// pas de préflight OPTIONS — qu'Apps Script ne sait pas traiter.
-function apiPost(body) {
-  return fetch(SHEETS_WEBHOOK_URL, {
+async function seConnecter(email, motDePasse) {
+  const r = await fetch(SUPABASE_URL + '/auth/v1/token?grant_type=password', {
     method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify(Object.assign({ token: API_TOKEN }, body))
-  }).then(r => r.json());
+    headers: { apikey: SUPABASE_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: email, password: motDePasse })
+  });
+  const d = await r.json();
+  if (!r.ok || !d.access_token) throw new Error(d.error_description || d.msg || 'Connexion refusée');
+  setSession(d);
+  return d;
+}
+
+// Le jeton d'accès expire au bout d'une heure. Sans ce renouvellement,
+// l'ouvrier serait déconnecté en plein chantier.
+async function rafraichirSession() {
+  if (!session || !session.refresh_token) return false;
+  try {
+    const r = await fetch(SUPABASE_URL + '/auth/v1/token?grant_type=refresh_token', {
+      method: 'POST',
+      headers: { apikey: SUPABASE_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: session.refresh_token })
+    });
+    const d = await r.json();
+    if (!r.ok || !d.access_token) return false;
+    setSession(d);
+    return true;
+  } catch (e) { return false; }
+}
+
+function seDeconnecter() {
+  if (getQueue().length && !confirm('Des modifications ne sont pas encore envoyées. Se déconnecter quand même ?')) return;
+  setSession(null);
+  location.reload();
+}
+
+// ============================================================
+// APPELS SUPABASE
+// ============================================================
+//
+// Un seul point de passage : il ajoute les en-têtes, et sur un 401 il
+// renouvelle le jeton puis rejoue la requête une fois.
+
+async function sb(chemin, opts, rejoue) {
+  opts = opts || {};
+  const h = Object.assign({ apikey: SUPABASE_KEY }, opts.headers || {});
+  if (session && session.access_token) h.Authorization = 'Bearer ' + session.access_token;
+
+  const res = await fetch(SUPABASE_URL + chemin, Object.assign({}, opts, { headers: h }));
+  if (res.status === 401 && !rejoue && await rafraichirSession()) {
+    return sb(chemin, opts, true);
+  }
+  return res;
+}
+
+async function sbJson(chemin, opts) {
+  const res = await sb(chemin, opts);
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()).slice(0, 200));
+  const t = await res.text();
+  return t ? JSON.parse(t) : null;
+}
+
+const REST = '/rest/v1/chantiers';
+
+// ---------- Stockage de fichiers ----------
+
+function cheminFichier(chantierId, nom) {
+  return 'chantiers/' + chantierId + '/' + nom;
+}
+
+async function televerser(chemin, dataUrl) {
+  const blob = await (await fetch(dataUrl)).blob();
+  const res = await sb('/storage/v1/object/' + BUCKET + '/' + chemin, {
+    method: 'POST',
+    headers: { 'Content-Type': blob.type || 'application/octet-stream', 'x-upsert': 'true' },
+    body: blob
+  });
+  if (!res.ok) throw new Error('upload ' + res.status);
+  return chemin;
+}
+
+// Bucket privé : le fichier n'est servi qu'avec un jeton valide, il n'y
+// a aucune URL publique vers les photos de tes clients.
+async function telecharger(chemin) {
+  const res = await sb('/storage/v1/object/authenticated/' + BUCKET + '/' + chemin);
+  if (!res.ok) return null;
+  const blob = await res.blob();
+  return new Promise(r => {
+    const fr = new FileReader();
+    fr.onload = () => r(fr.result);
+    fr.onerror = () => r(null);
+    fr.readAsDataURL(blob);
+  });
+}
+
+function supprimerFichier(chemin) {
+  return sb('/storage/v1/object/' + BUCKET + '/' + chemin, { method: 'DELETE' }).catch(() => null);
+}
+
+// ---------- Conversion base de données <-> app ----------
+
+function versApp(r) {
+  return {
+    id: r.id, statut: r.statut, client: r.client, adresse: r.adresse,
+    devis: r.devis || '', devisPath: r.devis_path || null,
+    consignes: r.consignes || '', notes: r.notes || '',
+    date: r.date_prevue || '', dateTermine: r.date_termine || '',
+    signaturePath: r.signature_path || null,
+    // Le dataURL de la signature n'est jamais transporté : 'signed'
+    // indique « signée, image à télécharger si besoin ».
+    signature: r.signature_path ? 'signed' : null,
+    photos: Array.isArray(r.photos) ? r.photos : [],
+    nbPhotos: Array.isArray(r.photos) ? r.photos.length : 0
+  };
+}
+
+function versDb(ch) {
+  return {
+    id: ch.id, statut: ch.statut || 'À faire',
+    client: ch.client || '', adresse: ch.adresse || '',
+    devis: ch.devis === '—' ? '' : (ch.devis || ''),
+    consignes: ch.consignes || '', notes: ch.notes || '',
+    date_prevue: ch.date || '',
+    date_termine: ch.statut === 'Terminé' ? (ch.dateTermine || todayFr()) : ''
+  };
 }
 
 function todayFr() { return new Date().toLocaleDateString('fr-FR'); }
@@ -281,20 +412,20 @@ async function compresser(file) {
 }
 
 // Source d'affichage d'une photo : cache local d'abord, puis le proxy
-// Apps Script. Les fichiers Drive restent privés au compte Google —
+// Le bucket est privé : aucune URL publique vers les fichiers —
 // aucune photo de propriété de client n'est mise en lien public.
 async function photoSrc(p) {
   if (p.cle) {
     const local = await fichierGet(p.cle);
     if (local) return local;
   }
-  if (p.fileId) {
-    const ck = 'file-' + p.fileId;
+  if (p.path) {
+    const ck = 'file-' + p.path;
     const cache = await fichierGet(ck);
     if (cache) return cache;
     try {
-      const r = await fetch(apiUrl({ action: 'file', fileId: p.fileId })).then(x => x.json());
-      if (r.success) { fichierSet(ck, r.dataUrl); return r.dataUrl; }
+      const d = await telecharger(p.path);
+      if (d) { fichierSet(ck, d); return d; }
     } catch (e) {}
   }
   return null;
@@ -309,7 +440,7 @@ function saveChantiers() {
     localStorage.setItem('jardinator_chantiers', JSON.stringify(chantiers));
   } catch (e) {
     // Quota dépassé : les signatures en dataURL sont lourdes. On purge
-    // celles des chantiers déjà envoyés, l'image est sur Drive.
+    // celles des chantiers déjà envoyés, l'image est sur le serveur.
     chantiers.forEach(c => {
       if (c.statut === 'Terminé' && c.signatureUrl && c.signature && c.signature !== 'signed') {
         c.signature = 'signed';
@@ -355,7 +486,7 @@ function enqueue(op) {
 
 let flushing = false;
 async function flushQueue() {
-  if (flushing || !CONFIGURED || !navigator.onLine) return;
+  if (flushing || !CONFIGURED || !session || !navigator.onLine) return;
   flushing = true;
   try {
     let q = getQueue();
@@ -364,22 +495,31 @@ async function flushQueue() {
       let ok = false;
       try {
         if (op.type === 'save') {
-          ok = (await fetch(apiUrl(op.payload)).then(r => r.json())).success;
+          // resolution=merge-duplicates : upsert sur la clé primaire, donc
+          // la même opération rejouée deux fois ne crée pas de doublon.
+          await sbJson(REST, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' },
+            body: JSON.stringify([op.payload])
+          });
+          ok = true;
         } else if (op.type === 'delete') {
-          ok = (await fetch(apiUrl({ action: 'delete', id: op.id })).then(r => r.json())).success;
-        } else if (op.type === 'signature') {
-          ok = (await apiPost({ action: 'signature', id: op.id, dataUrl: op.payload })).success;
-        } else if (op.type === 'photo' || op.type === 'devis') {
+          await sbJson(REST + '?id=eq.' + encodeURIComponent(op.id), { method: 'DELETE' });
+          ok = true;
+        } else if (op.type === 'deletePhoto') {
+          await supprimerFichier(op.path);
+          ok = true;
+        } else {
           const dataUrl = await fichierGet(op.cle);
           if (!dataUrl) {
-            ok = true;   // blob disparu (cache vidé) : inutile de bloquer la file
+            // Blob introuvable (cache vidé, écriture locale échouée).
+            // On abandonne l'opération pour ne pas bloquer la file — mais
+            // sans le dire, un fichier disparaîtrait sans laisser de trace.
+            console.warn('Jardinator : fichier local introuvable, envoi abandonné', op.type, op.cle);
+            ok = true;
           } else {
-            const r = await apiPost({ action: op.type, id: op.id, cle: op.cle, nom: op.nom, dataUrl: dataUrl });
-            ok = r.success;
-            if (ok) rattacher(op, r);
+            ok = await envoyerFichier(op, dataUrl);
           }
-        } else if (op.type === 'deletePhoto') {
-          ok = (await apiPost({ action: 'deletePhoto', id: op.id, fileId: op.fileId })).success;
         }
       } catch (e) { ok = false; }
       if (!ok) break;              // réseau ou serveur KO : on retentera
@@ -392,23 +532,67 @@ async function flushQueue() {
   }
 }
 
-// L'envoi a réussi : on rattache l'identifiant Drive à l'entrée locale,
-// pour que la vignette déjà en cache serve aussi aux prochains affichages
-// au lieu d'être retéléchargée.
+// Téléverse le fichier puis rattache son chemin à la ligne du chantier.
+// L'ordre compte : tant que le fichier n'est pas dans le bucket, écrire
+// son chemin en base pointerait vers le vide.
+async function envoyerFichier(op, dataUrl) {
+  if (op.type === 'signature') {
+    const chemin = await televerser(cheminFichier(op.id, 'signature.png'), dataUrl);
+    await sbJson(REST + '?id=eq.' + encodeURIComponent(op.id), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ signature_path: chemin })
+    });
+    rattacher(op, { signaturePath: chemin });
+    return true;
+  }
+
+  if (op.type === 'devis') {
+    const nom = (op.nom || 'devis.pdf').replace(/[^\w.\-]/g, '_');
+    const chemin = await televerser(cheminFichier(op.id, 'devis-' + nom), dataUrl);
+    await sbJson(REST + '?id=eq.' + encodeURIComponent(op.id), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ devis_path: chemin, devis: op.nom || 'Devis' })
+    });
+    rattacher(op, { devisPath: chemin });
+    return true;
+  }
+
+  // photo
+  const chemin = await televerser(cheminFichier(op.id, 'photo-' + op.cle + '.jpg'), dataUrl);
+  // Relecture avant écriture : deux téléphones peuvent ajouter une photo
+  // au même chantier, on ne veut pas que le second écrase la liste du premier.
+  const rows = await sbJson(REST + '?select=photos&id=eq.' + encodeURIComponent(op.id));
+  const liste = (rows && rows[0] && Array.isArray(rows[0].photos)) ? rows[0].photos : [];
+  if (!liste.some(p => p.path === chemin)) liste.push({ path: chemin, nom: op.nom || 'photo.jpg', cle: op.cle });
+  await sbJson(REST + '?id=eq.' + encodeURIComponent(op.id), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ photos: liste })
+  });
+  rattacher(op, { path: chemin });
+  return true;
+}
+
+// L'entrée locale reçoit le chemin distant : la vignette déjà en cache
+// continue de servir au lieu d'être retéléchargée.
 function rattacher(op, res) {
   const ch = chantiers.find(c => c.id === op.id);
   if (!ch) return;
   if (op.type === 'photo') {
     const p = (ch.photos || []).find(x => x.cle === op.cle);
-    if (p) { p.fileId = res.fileId; p.nom = res.nom; }
-    ch.nbPhotos = res.nbPhotos;
+    if (p) p.path = res.path;
+    ch.nbPhotos = (ch.photos || []).length;
   } else if (op.type === 'devis') {
-    ch.devisId = res.devisId; ch.devisUrl = res.devisUrl; ch.devis = res.nom;
+    ch.devisPath = res.devisPath;
+  } else if (op.type === 'signature') {
+    ch.signaturePath = res.signaturePath;
   }
   saveChantiers();
   if (currentChantier && currentChantier.id === op.id && !document.getElementById('viewer')) {
-    const cell = document.querySelector('.photo-cell[data-cle="' + op.cle + '"] .photo-flag');
-    if (cell) cell.remove();
+    const flag = document.querySelector('.photo-cell[data-cle="' + op.cle + '"] .photo-flag');
+    if (flag) flag.remove();
   }
 }
 
@@ -442,16 +626,13 @@ function isEditing() {
 }
 
 async function loadFromSheets(silent) {
-  if (!CONFIGURED) { chantiers = loadLocal(); render(); return; }
+  if (!CONFIGURED || !session) { chantiers = loadLocal(); render(); return; }
   if (!silent) showLoader();
   try {
-    const res = await fetch(apiUrl({ action: 'list', t: Date.now() }));
-    const data = await res.json();
-    if (data.success && data.chantiers) {
-      chantiers = mergeRemote(data.chantiers);
-      saveChantiers();
-      updateRefreshIndicator(true);
-    }
+    const rows = await sbJson(REST + '?select=*&order=maj_le.desc');
+    chantiers = mergeRemote((rows || []).map(versApp));
+    saveChantiers();
+    updateRefreshIndicator(true);
   } catch (e) {
     chantiers = loadLocal();
     updateRefreshIndicator(false);
@@ -485,12 +666,7 @@ function mergeRemote(remote) {
 }
 
 function syncChantier(ch) {
-  enqueue({ type: 'save', id: ch.id, payload: {
-    action: 'save', id: ch.id, statut: ch.statut, client: ch.client, adresse: ch.adresse,
-    devis: ch.devis || '', consignes: ch.consignes || '', notes: ch.notes || '',
-    date: ch.date || '', signature: (ch.signature ? 'Oui' : 'Non'),
-    driveFolderId: ch.driveFolderId || '', driveFolderUrl: ch.driveFolderUrl || ''
-  }});
+  enqueue({ type: 'save', id: ch.id, payload: versDb(ch) });
 }
 
 function updateRefreshIndicator(ok) {
@@ -509,7 +685,7 @@ function showLoader() {
     '<div style="text-align:center;padding:60px 20px;color:#999">' +
     '<div style="font-size:40px;margin-bottom:16px">🌹</div>' +
     '<div style="font-size:15px;font-weight:500;color:var(--noir);margin-bottom:8px">Chargement des chantiers…</div>' +
-    '<div style="font-size:13px">Synchronisation avec Google Sheets</div></div>';
+    '<div style="font-size:13px">Synchronisation en cours</div></div>';
 }
 
 // ============================================================
@@ -644,10 +820,10 @@ function renderDetail(c) {
         '<div class="detail-sub">Consignes d\'intervention</div></div></div>'
       : '') +
     '<div class="section-title" style="margin-top:14px">Devis</div>' +
-    (ch.devisCle || ch.devisId
+    (ch.devisCle || ch.devisPath
       ? '<div class="file-chip"><span style="font-size:20px">📄</span>' +
         '<span class="file-chip-name">' + esc(ch.devis || 'Devis') + '</span>' +
-        (ch.devisCle && !ch.devisId ? '<span class="photo-flag" style="position:static;background:var(--amber)">⏳</span>' : '') +
+        (ch.devisCle && !ch.devisPath ? '<span class="photo-flag" style="position:static;background:var(--amber)">⏳</span>' : '') +
         '<span style="font-size:13px;color:var(--blue);cursor:pointer;font-weight:600" onclick="ouvrirDevis()">Ouvrir</span></div>' +
         '<button class="gps-btn" onclick="joindreDevis()">📎 Remplacer le devis</button>'
       // Ancienne référence saisie à la main : on l'affiche sans prétendre
@@ -662,7 +838,7 @@ function renderDetail(c) {
     grillePhotos(ch.photos || []) +
     '<div class="divider"></div>' +
     (isTermine
-      ? '<div class="alert-success">✅ Chantier terminé' + (enAttente ? '.' : ' — fiche synchronisée dans Google Sheets.') + '</div>' +
+      ? '<div class="alert-success">✅ Chantier terminé' + (enAttente ? '.' : ' — fiche synchronisée.') + '</div>' +
         (ch.notes ? '<div class="field-group"><div class="field-label">Notes</div>' +
           '<div style="font-size:14px;color:var(--noir);line-height:1.5">' + esc(ch.notes) + '</div></div>' : '') +
         (ch.signature ? '<div class="detail-row"><div class="detail-icon" style="background:var(--green-light)">✍</div>' +
@@ -747,7 +923,7 @@ function grillePhotos(photos) {
     photos.map((p, i) =>
       '<div class="photo-cell" data-i="' + i + '" data-cle="' + esc(p.cle || '') + '" onclick="ouvrirViewer(' + i + ')">' +
         '<div class="photo-load">…</div>' +
-        (p.fileId ? '' : '<div class="photo-flag">⏳</div>') +
+        (p.path ? '' : '<div class="photo-flag">⏳</div>') +
       '</div>').join('') +
     '<div class="photo-cell photo-add" onclick="ajouterPhotos()">＋<span>PHOTO</span></div>' +
   '</div>';
@@ -780,7 +956,7 @@ async function ajouterPhotos() {
     const dataUrl = await compresser(f);
     const cle = nouvelleCle('ph');
     await fichierSet(cle, dataUrl);
-    const entree = { cle: cle, fileId: null, nom: f.name || 'photo.jpg' };
+    const entree = { cle: cle, path: null, nom: f.name || 'photo.jpg' };
 
     if (cible) {
       cible.photos = cible.photos || [];
@@ -829,8 +1005,8 @@ async function supprimerPhoto(i) {
   if (currentChantier) {
     currentChantier.nbPhotos = photos.length;
     saveChantiers();
-    // Côté Drive, le fichier part à la corbeille — récupérable 30 jours.
-    if (p.fileId) enqueue({ type: 'deletePhoto', id: currentChantier.id, fileId: p.fileId, cle: p.fileId });
+    // Le fichier est retiré du serveur une fois la file d'attente vidée.
+    if (p.path) enqueue({ type: 'deletePhoto', id: currentChantier.id, path: p.path, cle: p.path });
   }
   fermerViewer();
   render();
@@ -868,13 +1044,13 @@ async function ouvrirDevis() {
   const w = window.open('', '_blank');
 
   let dataUrl = ch.devisCle ? await fichierGet(ch.devisCle) : null;
-  if (!dataUrl && ch.devisId) {
-    const ck = 'file-' + ch.devisId;
+  if (!dataUrl && ch.devisPath) {
+    const ck = 'file-' + ch.devisPath;
     dataUrl = await fichierGet(ck);
     if (!dataUrl) {
       try {
-        const r = await fetch(apiUrl({ action: 'file', fileId: ch.devisId })).then(x => x.json());
-        if (r.success) { dataUrl = r.dataUrl; fichierSet(ck, dataUrl); }
+        dataUrl = await telecharger(ch.devisPath);
+        if (dataUrl) fichierSet(ck, dataUrl);
       } catch (e) {}
     }
   }
@@ -969,7 +1145,13 @@ function terminer() {
   // L'envoi part en tâche de fond via la file d'attente.
   saveChantiers();
   syncChantier(ch);
-  if (sigData !== 'signed') enqueue({ type: 'signature', id: ch.id, payload: sigData });
+
+  // La signature transite par le stockage local comme les photos : la
+  // file ne référence que des clés, jamais les octets eux-mêmes.
+  if (sigData && sigData !== 'signed') {
+    const cle = nouvelleCle('sg');
+    fichierSet(cle, sigData).then(() => enqueue({ type: 'signature', id: ch.id, cle: cle }));
+  }
 
   showModal('success');
 }
@@ -991,7 +1173,7 @@ function showModal(type) {
         '✓ ' + ((currentChantier && currentChantier.photos ? currentChantier.photos.length : 0)) + ' photo(s) enregistrée(s)<br>' +
         '✓ Notes sauvegardées<br>' +
         '✓ Signature client enregistrée<br>' +
-        '<span id="sync-line">⏳ Envoi vers Google Sheets…</span>' +
+        '<span id="sync-line">⏳ Envoi au serveur…</span>' +
       '</div>' +
       '<button class="btn btn-black" onclick="closeModal();currentChantier=null;render()">Retour à la liste</button>' +
     '</div>';
@@ -1017,7 +1199,7 @@ function suivreSync() {
     const line = document.getElementById('sync-line');
     if (!line) { clearInterval(tick); return; }
     if (!getQueue().length) {
-      line.textContent = '✓ Fiche Google Sheets mise à jour';
+      line.textContent = '✓ Fiche synchronisée';
       clearInterval(tick);
     } else if (!navigator.onLine) {
       line.textContent = '📴 Hors ligne — envoi au retour du réseau';
@@ -1123,7 +1305,7 @@ function creerChantier() {
     photos: photosNouveau.slice(),
     nbPhotos: photosNouveau.length,
     date: document.getElementById('n-date').value,
-    dateTermine: '', driveFolderId: null, driveFolderUrl: null
+    dateTermine: '', devisPath: null, signaturePath: null
   };
 
   chantiers.unshift(nouveau);
@@ -1166,18 +1348,20 @@ function renderStats(c) {
       '<div style="font-size:13px;color:#888;margin-top:3px">' + pct + '% de taux de complétion</div></div>' +
     '</div>' +
     '<div class="divider"></div>' +
-    '<div class="section-title">Synchronisation Google Sheets</div>' +
+    '<div class="section-title">Synchronisation</div>' +
     (!CONFIGURED
-      ? '<div class="alert-warning">⚠ URL Google Apps Script non configurée.</div>'
+      ? '<div class="alert-warning">⚠ URL Supabase non renseignée dans le code.</div>'
       : enAttente
         ? '<div class="alert-warning">⏳ ' + enAttente + ' modification(s) en attente d\'envoi.</div>'
-        : '<div class="alert-success"><span class="sync-indicator"></span>Connecté à Google Sheets — synchronisation active</div>') +
-    (CONFIGURED && !API_TOKEN
-      ? '<div class="alert-warning" style="margin-top:10px">⚠ Aucun jeton API configuré : le webhook est accessible à qui connaît son URL.</div>'
-      : '') +
+        : '<div class="alert-success"><span class="sync-indicator"></span>Connecté — synchronisation active</div>') +
+    '<div class="divider"></div>' +
+    '<div class="section-title">Compte</div>' +
+    '<div class="file-chip"><span style="font-size:20px">👤</span>' +
+      '<span class="file-chip-name">' + esc((session && session.user && session.user.email) || '—') + '</span></div>' +
+    '<button class="btn btn-gray" onclick="seDeconnecter()">Se déconnecter</button>' +
     '<div class="divider"></div>' +
     '<div class="section-title">Données locales</div>' +
-    '<div style="font-size:13px;color:#666;margin-bottom:12px">Les fiches sont conservées sur cet appareil pour fonctionner hors réseau, puis envoyées vers Google Sheets.</div>' +
+    '<div style="font-size:13px;color:#666;margin-bottom:12px">Les fiches sont conservées sur cet appareil pour fonctionner hors réseau, puis envoyées au serveur dès que le réseau revient.</div>' +
     '<button class="btn btn-outline-red" onclick="reinitialiser()">🗑 Réinitialiser les données locales</button>';
 }
 
@@ -1202,17 +1386,33 @@ function demarrer() {
   loadFromSheets(true);
 }
 
-function checkPassword() {
-  if (document.getElementById('pwd-input').value === APP_PASSWORD) {
-    localStorage.setItem('jardinator_auth', '1');
+async function connexion() {
+  const mail = document.getElementById('mail-input').value.trim();
+  const mdp  = document.getElementById('pwd-input').value;
+  const err  = document.getElementById('pwd-error');
+  const btn  = document.getElementById('btn-login');
+
+  if (!mail || !mdp) { err.textContent = 'Renseignez votre e-mail et votre mot de passe.'; err.style.display = 'block'; return; }
+  if (!CONFIGURED)   { err.textContent = 'Application non configurée (URL Supabase manquante).'; err.style.display = 'block'; return; }
+
+  err.style.display = 'none';
+  btn.textContent = 'Connexion…'; btn.disabled = true;
+  try {
+    await seConnecter(mail, mdp);
     demarrer();
-  } else {
-    document.getElementById('pwd-error').style.display = 'block';
+  } catch (e) {
+    err.textContent = /Invalid login/i.test(e.message)
+      ? 'E-mail ou mot de passe incorrect.'
+      : 'Connexion impossible : ' + e.message;
+    err.style.display = 'block';
     document.getElementById('pwd-input').value = '';
   }
+  btn.textContent = 'Se connecter'; btn.disabled = false;
 }
 
-if (localStorage.getItem('jardinator_auth') === '1') demarrer();
+// Session déjà ouverte : on entre directement. Le jeton sera renouvelé
+// au premier appel s'il a expiré.
+if (session && session.access_token) demarrer();
 
 // Dernier filet : au passage en arrière-plan (appel, veille, changement
 // d'app), on force la persistance de ce qui est à l'écran.
