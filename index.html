@@ -1679,24 +1679,28 @@ function renderNouveau(c) {
     '<div style="font-size:20px;font-weight:700;color:var(--noir);margin-bottom:18px">Nouveau chantier</div>' +
     (DRAFT_FIELDS.some(k => d[k]) || photosNouveau.length || devisNouveau || materielNouveau.length
       ? '<div class="alert-info">📝 Brouillon repris automatiquement.</div>' : '') +
+    // Ordre voulu par le bureau : ce qui décrit le travail d'abord, les
+    // coordonnées ensuite, la logistique après, le devis en dernier.
+    '<div class="field-group"><div class="field-label">Consignes d\'intervention</div>' +
+      '<textarea class="field-input" id="n-consignes" placeholder="Ex : Abattage + broyage. Accès portail code 2204.">' + esc(d['n-consignes'] || '') + '</textarea>' +
+      '<div class="draft-note" id="nouveau-draft"></div></div>' +
+    '<div class="field-group"><div class="field-label">📷 Photos (' + photosNouveau.length + ')</div>' +
+      grillePhotos(photosNouveau) + '</div>' +
     '<div class="field-group"><div class="field-label">Nom du client *</div>' +
       '<input class="field-input" id="n-client" placeholder="Ex : Jean Martin" autocomplete="name" value="' + esc(d['n-client'] || '') + '"></div>' +
     '<div class="field-group"><div class="field-label">Adresse d\'intervention *</div>' +
       '<input class="field-input" id="n-adresse" placeholder="Ex : 12 Rue des Érables, 69003 Lyon" autocomplete="street-address" value="' + esc(d['n-adresse'] || '') + '"></div>' +
     '<div class="field-group"><div class="field-label">Date prévue</div>' +
       '<input class="field-input" type="date" id="n-date" value="' + esc(d['n-date'] || today) + '"></div>' +
-    '<div class="field-group"><div class="field-label">👷 Assigner à</div>' +
-      casesOuvriers(assignesNouveau, 'basculerAssignationNouveau') + '</div>' +
-    '<div class="field-group"><div class="field-label">🧰 Matériel à emporter</div>' +
-      casesMateriel(materielNouveau, 'basculerMaterielNouveau') + '</div>' +
     '<div class="field-group"><div class="field-label">Statut</div>' +
       '<select class="field-input" id="n-statut">' +
         '<option' + (enCours ? '' : ' selected') + '>À faire</option>' +
         '<option' + (enCours ? ' selected' : '') + '>En cours</option>' +
       '</select></div>' +
-    '<div class="field-group"><div class="field-label">Consignes d\'intervention</div>' +
-      '<textarea class="field-input" id="n-consignes" placeholder="Ex : Abattage + broyage. Accès portail code 2204.">' + esc(d['n-consignes'] || '') + '</textarea>' +
-      '<div class="draft-note" id="nouveau-draft"></div></div>' +
+    '<div class="field-group"><div class="field-label">🧰 Matériel à emporter</div>' +
+      casesMateriel(materielNouveau, 'basculerMaterielNouveau') + '</div>' +
+    '<div class="field-group"><div class="field-label">👷 Assigner à</div>' +
+      casesOuvriers(assignesNouveau, 'basculerAssignationNouveau') + '</div>' +
     '<div class="field-group"><div class="field-label">📄 Devis</div>' +
       (devisNouveau
         ? '<div class="file-chip"><span style="font-size:20px">📄</span>' +
@@ -1704,8 +1708,6 @@ function renderNouveau(c) {
           '<span class="file-chip-x" onclick="devisNouveau=null;saveNouveauDraft();render()">×</span></div>'
         : '<button class="gps-btn" onclick="joindreDevis()">📎 Joindre le devis (PDF)</button>') +
     '</div>' +
-    '<div class="field-group"><div class="field-label">📷 Photos (' + photosNouveau.length + ')</div>' +
-      grillePhotos(photosNouveau) + '</div>' +
     '<button class="btn btn-red" onclick="creerChantier()">➕ Créer le chantier</button>' +
     '<button class="btn btn-gray" onclick="annulerNouveau()">Annuler</button>';
 
