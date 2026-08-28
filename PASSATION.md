@@ -195,6 +195,32 @@ fonctionnent pas. Ça ressemble à une app cassée alors que non.
   `statut`, `notes` et `date_termine`, cf. `versDb()` — mais les notes
   elles-mêmes restent en dernier-écrit-gagne.
 
+## Entretien annuel
+
+Le Dashboard du patron a une section **Entretien** qui affiche le nombre
+de photos stockées et une estimation du remplissage (environ 300 Ko par
+photo sur 1 Go offert). Au-delà de 75 %, l'indicateur passe en rouge.
+
+Trois boutons, du plus anodin au plus dangereux :
+
+1. **Exporter les fiches (CSV)** — toutes les colonnes utiles, séparateur
+   point-virgule et BOM UTF-8 pour qu'Excel en français ouvre le fichier
+   correctement. Les photos ne sont pas dans l'export.
+2. **Supprimer les photos des chantiers terminés depuis 6/12/24 mois** —
+   c'est le ménage courant. Les fiches sont conservées : client, adresse,
+   dates et notes restent consultables. Suppression par lots de 100.
+3. **Remise à zéro complète** — efface tout, y compris l'historique.
+   Double confirmation dont une saisie du mot EFFACER.
+
+Les trois sont réservés au patron. Rappelle à qui s'en sert que **la
+suppression Supabase est définitive** : pas de corbeille, contrairement
+à Drive. L'export CSV est le seul filet.
+
+Si une suppression s'interrompt en cours de route, la relancer reprend
+là où elle en était — les fichiers partent avant que la liste ne soit
+vidée en base, de sorte qu'une interruption laisse des références vers
+des fichiers absents plutôt que des fichiers que plus rien ne référence.
+
 ## Si ça casse
 
 Dans l'ordre : le projet Supabase est-il en pause ? Le dernier build

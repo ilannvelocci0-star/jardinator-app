@@ -334,6 +334,7 @@ function versApp(r) {
     date: r.date_prevue || '', dateTermine: r.date_termine || '',
     assignes: Array.isArray(r.assignes) ? r.assignes : [],
     materiel: Array.isArray(r.materiel) ? r.materiel : [],
+    majLe: r.maj_le || '',
     photos: Array.isArray(r.photos) ? r.photos : [],
     nbPhotos: Array.isArray(r.photos) ? r.photos.length : 0
   };
@@ -1797,6 +1798,140 @@ function creerChantier() {
 }
 
 // ============================================================
+// ENTRETIEN — export et ménage
+// ============================================================
+//
+// Le stockage gratuit fait 1 Go, soit environ 3000 photos. Ce sont
+// elles qui le remplissent : une fiche texte pèse quelques centaines
+// d'octets. Vider les photos anciennes libère donc presque tout sans
+// toucher à l'historique des chantiers.
+//
+// ⚠ Chez Supabase, la suppression est définitive. Pas de corbeille.
+
+function csvCellule(v) {
+  const t = (v === null || v === undefined) ? '' : String(v);
+  return '"' + t.replace(/"/g, '""') + '"';
+}
+
+function exporterCsv() {
+  const colonnes = [
+    ['ID', c => c.id], ['Statut', c => c.statut], ['Client', c => c.client],
+    ['Adresse', c => c.adresse], ['Date prévue', c => c.date],
+    ['Date clôture', c => c.dateTermine],
+    ['Ouvriers', c => (c.assignes || []).map(nomDe).join(' / ')],
+    ['Matériel', c => (c.materiel || []).join(' / ')],
+    ['Consignes', c => c.consignes], ['Notes', c => c.notes],
+    ['Photos', c => (c.photos || []).length], ['Devis', c => c.devis]
+  ];
+
+  const lignes = [colonnes.map(x => csvCellule(x[0])).join(';')]
+    .concat(chantiers.map(ch => colonnes.map(x => csvCellule(x[1](ch))).join(';')));
+
+  // Point-virgule et BOM : sans eux, Excel en configuration française
+  // colle tout dans une seule colonne et casse les accents.
+  const blob = new Blob(['\ufeff' + lignes.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'jardinator-chantiers-' + new Date().toISOString().split('T')[0] + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+// Suppression par lots : un appel par fichier serait interminable sur
+// plusieurs centaines de photos.
+async function supprimerFichiers(chemins) {
+  let faits = 0;
+  for (let i = 0; i < chemins.length; i += 100) {
+    const lot = chemins.slice(i, i + 100);
+    const res = await sb('/storage/v1/object/' + BUCKET, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefixes: lot })
+    });
+    if (res.ok) faits += lot.length;
+  }
+  return faits;
+}
+
+function moisDepuis(ch) {
+  // date_termine est au format jj/mm/aaaa ; maj_le sert de repli.
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(ch.dateTermine || '');
+  const d = m ? new Date(+m[3], +m[2] - 1, +m[1]) : (ch.majLe ? new Date(ch.majLe) : null);
+  if (!d || isNaN(d)) return null;
+  return (Date.now() - d.getTime()) / (1000 * 60 * 60 * 24 * 30.44);
+}
+
+function chantiersAPurger(mois) {
+  return chantiers.filter(ch => {
+    if (ch.statut !== 'Terminé' || !(ch.photos || []).length) return false;
+    const age = moisDepuis(ch);
+    return age !== null && age >= mois;
+  });
+}
+
+async function purgerPhotos() {
+  const mois = Number(document.getElementById('purge-mois').value);
+  const cibles = chantiersAPurger(mois);
+  const chemins = cibles.flatMap(ch => (ch.photos || []).map(p => p.path).filter(Boolean));
+
+  if (!chemins.length) { alert('Aucune photo à supprimer pour cette période.'); return; }
+  if (!confirm(chemins.length + ' photo(s) sur ' + cibles.length + ' chantier(s) terminé(s) depuis plus de ' +
+      mois + ' mois.\n\nLes fiches sont conservées, seules les photos partent.\n\n' +
+      'Cette suppression est DÉFINITIVE. Continuer ?')) return;
+
+  const btn = document.getElementById('btn-purge');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Suppression…'; }
+  try {
+    await supprimerFichiers(chemins);
+    // On vide la liste côté base après coup : si l'app s'interrompt
+    // entre les deux, on garde des références vers des fichiers absents
+    // plutôt que des fichiers que plus rien ne référence.
+    for (const ch of cibles) {
+      await patchChantier(ch.id, { photos: [] });
+      ch.photos = []; ch.nbPhotos = 0;
+    }
+    saveChantiers();
+    alert(chemins.length + ' photo(s) supprimée(s). Les fiches sont intactes.');
+  } catch (e) {
+    alert('Suppression interrompue : ' + (e.message || e) + '\n\nRelancez pour reprendre.');
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '🧹 Supprimer ces photos'; }
+  render();
+}
+
+async function remiseAZero() {
+  if (!estPatron()) return;
+  const total = chantiers.length;
+  if (!confirm('REMISE À ZÉRO COMPLÈTE\n\n' + total + ' fiche(s), toutes les photos et tous les devis ' +
+      'seront supprimés définitivement.\n\nAvez-vous exporté les fiches en CSV ?')) return;
+
+  const mot = prompt('Cette action est irréversible.\n\nTapez EFFACER en majuscules pour confirmer :');
+  if (mot !== 'EFFACER') { alert('Annulé.'); return; }
+
+  const btn = document.getElementById('btn-raz');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Suppression…'; }
+  try {
+    const chemins = chantiers.flatMap(ch =>
+      (ch.photos || []).map(p => p.path).concat([ch.devisPath]).filter(Boolean));
+    if (chemins.length) await supprimerFichiers(chemins);
+    for (const ch of chantiers.slice()) {
+      await sbJson(REST + '?id=eq.' + encodeURIComponent(ch.id), { method: 'DELETE' });
+    }
+    chantiers = [];
+    localStorage.removeItem('jardinator_chantiers');
+    localStorage.removeItem('jardinator_queue');
+    localStorage.removeItem('jardinator_rejets');
+    saveChantiers();
+    alert('Base remise à zéro.');
+  } catch (e) {
+    alert('Suppression interrompue : ' + (e.message || e) + '\n\nRelancez pour reprendre.');
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '⚠️ Remise à zéro complète'; }
+  render();
+}
+
+// ============================================================
 // DASHBOARD
 // ============================================================
 
@@ -1855,6 +1990,35 @@ function renderStats(c) {
     '<div class="file-chip"><span style="font-size:20px">👤</span>' +
       '<span class="file-chip-name">' + esc((session && session.user && session.user.email) || '—') + '</span></div>' +
     '<button class="btn btn-gray" onclick="seDeconnecter()">Se déconnecter</button>' +
+    (estPatron()
+      ? '<div class="divider"></div>' +
+        '<div class="section-title">Entretien</div>' +
+        (() => {
+          const nbPhotos = chantiers.reduce((t, c) => t + (c.photos || []).length, 0);
+          // ~300 Ko par photo après compression, sur 1 Go offert.
+          const pct = Math.min(100, Math.round(nbPhotos * 0.3 / 1024 * 100));
+          return '<div class="stat-card" style="margin-bottom:14px;display:flex;align-items:center;gap:14px">' +
+            '<div style="font-size:32px">🗄</div>' +
+            '<div><div style="font-weight:700;font-size:16px;color:var(--noir)">' + nbPhotos + ' photos stockées</div>' +
+            '<div style="font-size:13px;color:' + (pct > 75 ? 'var(--rouge)' : '#888') + ';margin-top:3px">' +
+            'environ ' + pct + '% de l\'espace gratuit' + (pct > 75 ? ' — pensez au ménage' : '') + '</div></div></div>';
+        })() +
+        '<div style="font-size:13px;color:#666;margin-bottom:10px">Sauvegardez avant tout ménage : la suppression est définitive, il n\'y a pas de corbeille.</div>' +
+        '<button class="btn btn-gray" onclick="exporterCsv()">📥 Exporter les fiches (CSV)</button>' +
+        '<div class="divider"></div>' +
+        '<div class="field-group"><div class="field-label">🧹 Supprimer les photos des chantiers terminés depuis</div>' +
+          '<select class="field-input" id="purge-mois">' +
+            '<option value="6">plus de 6 mois</option>' +
+            '<option value="12" selected>plus de 12 mois</option>' +
+            '<option value="24">plus de 24 mois</option>' +
+          '</select>' +
+          '<div style="font-size:12px;color:#888;margin-top:6px">Les fiches sont conservées : client, adresse, dates et notes restent consultables.</div>' +
+        '</div>' +
+        '<button class="btn btn-gray" id="btn-purge" onclick="purgerPhotos()">🧹 Supprimer ces photos</button>' +
+        '<div class="divider"></div>' +
+        '<div class="alert-warning">La remise à zéro efface aussi les fiches et tout l\'historique. À réserver aux cas exceptionnels.</div>' +
+        '<button class="btn btn-outline-red" id="btn-raz" onclick="remiseAZero()">⚠️ Remise à zéro complète</button>'
+      : '') +
     '<div class="divider"></div>' +
     '<div class="section-title">Données locales</div>' +
     '<div style="font-size:13px;color:#666;margin-bottom:12px">Les fiches sont conservées sur cet appareil pour fonctionner hors réseau, puis envoyées au serveur dès que le réseau revient.</div>' +
