@@ -28,19 +28,34 @@ create table if not exists public.chantiers (
   -- « cle » est l'identifiant local de l'appareil qui a pris la photo :
   -- il lui permet de réutiliser sa vignette au lieu de la retélécharger.
   photos         jsonb not null default '[]'::jsonb,
-  -- Ouvrier affecté au chantier. Un ouvrier ne voit que ses chantiers ;
-  -- une fiche non affectée n'est visible que du patron.
-  assigne_a      uuid references auth.users (id) on delete set null,
+  -- Ouvriers affectés au chantier. Un tableau : une taille de haie se
+  -- fait souvent à deux ou trois. Chacun d'eux voit la fiche ; un
+  -- chantier sans personne n'est visible que du patron.
+  assignes       uuid[] not null default '{}',
   cree_le        timestamptz not null default now(),
   maj_le         timestamptz not null default now()
 );
 
--- Colonne ajoutée après coup : permet de rejouer ce fichier sur une base
--- déjà créée sans repartir de zéro.
+-- Colonnes ajoutées après coup : permet de rejouer ce fichier sur une
+-- base déjà créée sans repartir de zéro.
 alter table public.chantiers
-  add column if not exists assigne_a uuid references auth.users (id) on delete set null;
+  add column if not exists assignes uuid[] not null default '{}';
 
-create index if not exists chantiers_assigne_idx on public.chantiers (assigne_a);
+-- Reprise de l'ancienne colonne « un seul ouvrier », si elle existe.
+do $$
+begin
+  if exists (select 1 from information_schema.columns
+              where table_schema = 'public' and table_name = 'chantiers'
+                and column_name = 'assigne_a') then
+    update public.chantiers
+       set assignes = array[assigne_a]
+     where assigne_a is not null and assignes = '{}';
+    alter table public.chantiers drop column assigne_a;
+  end if;
+end $$;
+
+-- Index GIN : c'est ce qui rend « auth.uid() = any(assignes) » rapide.
+create index if not exists chantiers_assignes_idx on public.chantiers using gin (assignes);
 
 create index if not exists chantiers_statut_idx on public.chantiers (statut);
 create index if not exists chantiers_maj_idx    on public.chantiers (maj_le desc);
@@ -78,19 +93,23 @@ drop policy if exists "chantiers creation"     on public.chantiers;
 drop policy if exists "chantiers modification" on public.chantiers;
 drop policy if exists "chantiers suppression"  on public.chantiers;
 
--- Le patron voit tout. L'ouvrier ne voit QUE les chantiers qui lui sont
--- affectés — le filtrage est fait ici, par la base : impossible de voir
--- les chantiers d'un collègue en trafiquant l'application.
+-- Le patron voit tout. L'ouvrier ne voit QUE les chantiers où il figure
+-- — le filtrage est fait ici, par la base : impossible de voir les
+-- chantiers d'un collègue en trafiquant l'application.
 create policy "chantiers lecture" on public.chantiers
   for select to authenticated
-  using (public.est_patron() or assigne_a = auth.uid());
+  using (public.est_patron() or auth.uid() = any (assignes));
 
 -- Même périmètre en écriture : notes, statut et signature de fin de
 -- chantier, uniquement sur ses propres chantiers.
+--
+-- Le with check porte sur la ligne APRÈS modification : un ouvrier ne
+-- peut donc pas se retirer de la liste, ni réaffecter le chantier à
+-- quelqu'un d'autre. Seul le patron redistribue.
 create policy "chantiers modification" on public.chantiers
   for update to authenticated
-  using (public.est_patron() or assigne_a = auth.uid())
-  with check (public.est_patron() or assigne_a = auth.uid());
+  using (public.est_patron() or auth.uid() = any (assignes))
+  with check (public.est_patron() or auth.uid() = any (assignes));
 
 -- Créer et supprimer une fiche client reste au patron. Une fausse manip
 -- d'un ouvrier ne doit pas effacer un chantier facturé.

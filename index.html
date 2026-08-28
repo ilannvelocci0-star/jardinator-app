@@ -322,7 +322,7 @@ function versApp(r) {
     // Le dataURL de la signature n'est jamais transporté : 'signed'
     // indique « signée, image à télécharger si besoin ».
     signature: r.signature_path ? 'signed' : null,
-    assigneA: r.assigne_a || null,
+    assignes: Array.isArray(r.assignes) ? r.assignes : [],
     photos: Array.isArray(r.photos) ? r.photos : [],
     nbPhotos: Array.isArray(r.photos) ? r.photos.length : 0
   };
@@ -339,7 +339,7 @@ function versDb(ch) {
   };
   // Seul le patron affecte. Un ouvrier qui enverrait ce champ verrait sa
   // requête rejetée par la base — autant ne pas l'envoyer du tout.
-  if (estPatron()) d.assigne_a = ch.assigneA || null;
+  if (estPatron()) d.assignes = ch.assignes || [];
   return d;
 }
 
@@ -744,6 +744,29 @@ function nomDe(id) {
   return m ? m.nom : (id ? 'Ouvrier inconnu' : 'Non assigné');
 }
 
+function nomsDe(ids) {
+  return (ids || []).map(nomDe).join(', ') || 'Personne';
+}
+
+// Sélection en cours dans le formulaire de création (le chantier
+// n'existe pas encore, donc pas de fiche où stocker).
+let assignesNouveau = [];
+
+// Liste à cocher : plusieurs ouvriers sur un même chantier, cas courant
+// en élagage où l'on part rarement seul.
+function casesOuvriers(selection, action) {
+  const ouvriers = equipe.filter(u => u.role !== 'patron');
+  if (!ouvriers.length) return '<div style="font-size:13px;color:#999">Aucun ouvrier enregistré.</div>';
+  return ouvriers.map(u => {
+    const coche = (selection || []).indexOf(u.id) > -1;
+    return '<label style="display:flex;align-items:center;gap:10px;padding:11px 12px;background:white;' +
+      'border:1px solid ' + (coche ? 'var(--rouge)' : '#ddd') + ';border-radius:10px;margin-bottom:8px;cursor:pointer">' +
+      '<input type="checkbox" style="width:20px;height:20px;accent-color:var(--rouge);flex-shrink:0" ' +
+        (coche ? 'checked ' : '') + 'onchange="' + action + '(\'' + esc(u.id) + '\', this.checked)">' +
+      '<span style="font-size:15px;color:var(--noir)">' + esc(u.nom) + '</span></label>';
+  }).join('');
+}
+
 function switchTab(tab) {
   activeTab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -796,8 +819,8 @@ function renderList(c) {
       '<div class="card-address">📍 ' + esc(ch.adresse) + '</div>' +
       // Le patron a besoin de voir d'un coup d'œil qui est sur quoi.
       (patron
-        ? '<div style="font-size:12px;color:' + (ch.assigneA ? 'var(--blue)' : '#c0392b') + ';margin-bottom:6px">' +
-          (ch.assigneA ? '👷 ' + esc(nomDe(ch.assigneA)) : '⚠ Non assigné') + '</div>'
+        ? '<div style="font-size:12px;color:' + ((ch.assignes || []).length ? 'var(--blue)' : '#c0392b') + ';margin-bottom:6px">' +
+          ((ch.assignes || []).length ? '👷 ' + esc(nomsDe(ch.assignes)) : '⚠ Personne assigné') + '</div>'
         : '') +
       '<div style="display:flex;justify-content:space-between;align-items:center">' +
         '<span style="font-size:12px;color:#999">' + esc(ch.id) + ' · ' + esc(ch.date) +
@@ -858,14 +881,16 @@ function renderDetail(c) {
     // Affectation : menu déroulant pour le patron, simple information
     // pour l'ouvrier — qui ne voit de toute façon que ses chantiers.
     (estPatron()
-      ? '<div class="field-group" style="margin-top:12px"><div class="field-label">👷 Ouvrier assigné</div>' +
-        '<select class="field-input" id="assigne-select" onchange="changerAssignation(this.value)">' +
-          '<option value=""' + (ch.assigneA ? '' : ' selected') + '>— Non assigné —</option>' +
-          equipe.filter(u => u.role !== 'patron').map(u =>
-            '<option value="' + esc(u.id) + '"' + (ch.assigneA === u.id ? ' selected' : '') + '>' +
-            esc(u.nom) + '</option>').join('') +
-        '</select><div class="draft-note" id="assigne-note"></div></div>'
-      : '') +
+      ? '<div class="field-group" style="margin-top:12px">' +
+        '<div class="field-label">👷 Ouvriers sur ce chantier</div>' +
+        casesOuvriers(ch.assignes, 'basculerAssignation') +
+        '<div class="draft-note" id="assigne-note"></div></div>'
+      // L'ouvrier voit avec qui il travaille : utile pour s'organiser.
+      : ((ch.assignes || []).length > 1
+          ? '<div class="detail-row"><div class="detail-icon" style="background:var(--blue-light)">👷</div>' +
+            '<div><div class="detail-main">' + esc(nomsDe(ch.assignes)) + '</div>' +
+            '<div class="detail-sub">Sur ce chantier</div></div></div>'
+          : '')) +
     (ch.consignes
       ? '<div class="detail-row"><div class="detail-icon" style="background:var(--rouge-light)">⚠</div>' +
         '<div><div class="detail-main" style="color:var(--rouge-dark)">' + esc(ch.consignes) + '</div>' +
@@ -920,18 +945,31 @@ function renderDetail(c) {
 
 function quitterFiche() { saveNotesDraft(); currentChantier = null; render(); }
 
-// Le patron affecte un ouvrier. Enregistré localement puis envoyé via la
-// file : pas d'attente réseau, et ça marche depuis un chantier sans 4G.
-function changerAssignation(id) {
+// Le patron coche ou décoche un ouvrier. Enregistré localement puis
+// envoyé via la file : pas d'attente réseau, et ça marche depuis un
+// chantier sans 4G.
+function basculerAssignation(id, actif) {
   if (!currentChantier) return;
-  currentChantier.assigneA = id || null;
+  const liste = currentChantier.assignes = currentChantier.assignes || [];
+  const i = liste.indexOf(id);
+  if (actif && i === -1) liste.push(id);
+  else if (!actif && i > -1) liste.splice(i, 1);
+
   saveChantiers();
   syncChantier(currentChantier);
+
   const n = document.getElementById('assigne-note');
   if (n) {
-    n.textContent = id ? '✓ Assigné à ' + nomDe(id) : '✓ Assignation retirée';
+    n.textContent = liste.length ? '✓ ' + nomsDe(liste) : '✓ Plus personne assigné';
     setTimeout(() => { if (n) n.textContent = ''; }, 2000);
   }
+}
+
+// Même chose dans le formulaire de création, avant que la fiche existe.
+function basculerAssignationNouveau(id, actif) {
+  const i = assignesNouveau.indexOf(id);
+  if (actif && i === -1) assignesNouveau.push(id);
+  else if (!actif && i > -1) assignesNouveau.splice(i, 1);
 }
 
 // Sauvegarde à la frappe. Sans ça, tout ce qui est tapé ne vit que dans
@@ -1299,11 +1337,7 @@ function renderNouveau(c) {
     '<div class="field-group"><div class="field-label">Date prévue</div>' +
       '<input class="field-input" type="date" id="n-date" value="' + esc(d['n-date'] || today) + '"></div>' +
     '<div class="field-group"><div class="field-label">👷 Assigner à</div>' +
-      '<select class="field-input" id="n-assigne">' +
-        '<option value="">— Non assigné —</option>' +
-        equipe.filter(u => u.role !== 'patron').map(u =>
-          '<option value="' + esc(u.id) + '">' + esc(u.nom) + '</option>').join('') +
-      '</select></div>' +
+      casesOuvriers(assignesNouveau, 'basculerAssignationNouveau') + '</div>' +
     '<div class="field-group"><div class="field-label">Statut</div>' +
       '<select class="field-input" id="n-statut">' +
         '<option' + (enCours ? '' : ' selected') + '>À faire</option>' +
@@ -1357,6 +1391,7 @@ function annulerNouveau() {
   if (devisNouveau) fichierDel(devisNouveau.cle);
   photosNouveau = [];
   devisNouveau = null;
+  assignesNouveau = [];
   switchTab('chantiers');
 }
 
@@ -1374,7 +1409,7 @@ function creerChantier() {
     devisCle: devisNouveau ? devisNouveau.cle : null,
     consignes: document.getElementById('n-consignes').value,
     notes: '', signature: null,
-    assigneA: document.getElementById('n-assigne') ? (document.getElementById('n-assigne').value || null) : null,
+    assignes: assignesNouveau.slice(),
     photos: photosNouveau.slice(),
     nbPhotos: photosNouveau.length,
     date: document.getElementById('n-date').value,
@@ -1385,7 +1420,7 @@ function creerChantier() {
   saveChantiers();
   clearNouveauDraft();
 
-  // La ligne doit exister côté Sheets avant que photos et devis puissent
+  // La ligne doit exister côté serveur avant que photos et devis puissent
   // s'y rattacher : la file est FIFO, donc « save » d'abord.
   syncChantier(nouveau);
   if (devisNouveau) enqueue({ type: 'devis', id: nouveau.id, cle: devisNouveau.cle, nom: devisNouveau.nom });
@@ -1393,6 +1428,7 @@ function creerChantier() {
 
   photosNouveau = [];
   devisNouveau = null;
+  assignesNouveau = [];
   switchTab('chantiers');
 }
 
