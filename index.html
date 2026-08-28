@@ -58,9 +58,6 @@ textarea.field-input{min-height:90px;resize:vertical}
 .detail-icon{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
 .detail-main{font-size:14px;color:var(--noir);font-weight:500}
 .detail-sub{font-size:12px;color:#999}
-.canvas-wrap{border:1.5px solid #ccc;border-radius:10px;background:#faf8f6;height:130px;position:relative;overflow:hidden;touch-action:none}
-canvas#sigCanvas{position:absolute;top:0;left:0;width:100%;height:100%}
-.sig-placeholder{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#bbb;font-size:14px;pointer-events:none;white-space:nowrap}
 
 .alert-success{padding:12px 14px;border-radius:10px;font-size:13px;margin-bottom:12px;background:var(--green-light);color:var(--green)}
 .alert-info{padding:12px 14px;border-radius:10px;font-size:13px;margin-bottom:12px;background:var(--blue-light);color:var(--blue)}
@@ -182,8 +179,7 @@ function prenomConnecte() {
 
 let equipe = [];   // [{id, nom, role}] — rempli à la connexion, pour le patron
 let activeTab = 'chantiers', filterStatut = 'tous';
-let currentChantier = null, sigData = null;
-let sigDrawing = false, sigCtx = null, sigLast = null;
+let currentChantier = null;
 let chantiers = [];
 
 // ============================================================
@@ -326,10 +322,6 @@ function versApp(r) {
     devis: r.devis || '', devisPath: r.devis_path || null,
     consignes: r.consignes || '', notes: r.notes || '',
     date: r.date_prevue || '', dateTermine: r.date_termine || '',
-    signaturePath: r.signature_path || null,
-    // Le dataURL de la signature n'est jamais transporté : 'signed'
-    // indique « signée, image à télécharger si besoin ».
-    signature: r.signature_path ? 'signed' : null,
     assignes: Array.isArray(r.assignes) ? r.assignes : [],
     photos: Array.isArray(r.photos) ? r.photos : [],
     nbPhotos: Array.isArray(r.photos) ? r.photos.length : 0
@@ -366,24 +358,47 @@ function nouvelleCle(prefixe) {
 // de tampon d'envoi (photo prise hors réseau) et de cache d'affichage
 // (photo déjà vue, plus jamais retéléchargée).
 
+// Délai maximal accordé au stockage local. Sans lui, une base bloquée
+// — autre onglet ouvert, navigation privée, profil corrompu — fige
+// l'attente indéfiniment : le bouton photo ne répondrait plus, sans le
+// moindre message.
+const IDB_DELAI = 6000;
+
+function avecDelai(promesse, message) {
+  return Promise.race([
+    promesse,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(message)), IDB_DELAI))
+  ]);
+}
+
 let _db = null;
 function db() {
   if (_db) return _db;
-  _db = new Promise((res, rej) => {
-    const r = indexedDB.open('jardinator', 1);
+  _db = avecDelai(new Promise((res, rej) => {
+    let r;
+    try { r = indexedDB.open('jardinator', 1); } catch (e) { return rej(e); }
     r.onupgradeneeded = () => r.result.createObjectStore('fichiers');
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
-  });
+    r.onblocked = () => rej(new Error('base verrouillée par un autre onglet'));
+  }), 'ouverture du stockage local trop lente')
+    // On oublie l'échec pour qu'une tentative ultérieure puisse réussir.
+    .catch(e => { _db = null; throw e; });
   return _db;
 }
 
 function fichierTx(mode, action) {
-  return db().then(d => new Promise((res, rej) => {
-    const req = action(d.transaction('fichiers', mode).objectStore('fichiers'));
-    req.onsuccess = () => res(req.result);
-    req.onerror = () => rej(req.error);
-  })).catch(() => null);
+  return avecDelai(
+    db().then(d => new Promise((res, rej) => {
+      const req = action(d.transaction('fichiers', mode).objectStore('fichiers'));
+      req.onsuccess = () => res(req.result);
+      req.onerror = () => rej(req.error);
+    })),
+    'stockage local trop lent'
+  ).catch(e => {
+    console.warn('Jardinator : stockage local indisponible —', e && e.message);
+    return null;
+  });
 }
 
 const fichierGet = cle      => fichierTx('readonly',  s => s.get(cle));
@@ -467,15 +482,8 @@ function saveChantiers() {
   try {
     localStorage.setItem('jardinator_chantiers', JSON.stringify(chantiers));
   } catch (e) {
-    // Quota dépassé : les signatures en dataURL sont lourdes. On purge
-    // celles des chantiers déjà envoyés, l'image est sur le serveur.
-    chantiers.forEach(c => {
-      if (c.statut === 'Terminé' && c.signatureUrl && c.signature && c.signature !== 'signed') {
-        c.signature = 'signed';
-      }
-    });
-    try { localStorage.setItem('jardinator_chantiers', JSON.stringify(chantiers)); }
-    catch (e2) { console.warn('Stockage local saturé', e2); }
+    // Quota dépassé : rien à purger ici, les photos sont en IndexedDB.
+    console.warn('Stockage local saturé', e);
   }
 }
 
@@ -573,7 +581,7 @@ function decrireOp(op) {
   return ({ save: 'Modification de ' + qui, create: 'Création de ' + qui,
             delete: 'Suppression de ' + qui,
             photo: 'Photo de ' + qui, devis: 'Devis de ' + qui,
-            signature: 'Signature de ' + qui, deletePhoto: 'Photo supprimée de ' + qui })[op.type]
+            deletePhoto: 'Photo supprimée de ' + qui })[op.type]
          || (op.type + ' — ' + qui);
 }
 
@@ -589,7 +597,7 @@ let flushing = false, relanceDemandee = false;
 async function flushQueue() {
   // Un envoi est déjà en cours : on note qu'il faudra recommencer plutôt
   // que d'abandonner. Sans ça, une opération empilée pendant l'envoi
-  // (typiquement la signature, ajoutée juste après la fiche) attendait
+  // (typiquement une photo, ajoutée juste après la fiche) attendait
   // le prochain passage automatique.
   if (flushing) { relanceDemandee = true; return; }
   if (!CONFIGURED || !session || !navigator.onLine) return;
@@ -643,17 +651,6 @@ async function flushQueue() {
 // L'ordre compte : tant que le fichier n'est pas dans le bucket, écrire
 // son chemin en base pointerait vers le vide.
 async function envoyerFichier(op, dataUrl) {
-  if (op.type === 'signature') {
-    const chemin = await televerser(cheminFichier(op.id, 'signature.png'), dataUrl);
-    await sbJson(REST + '?id=eq.' + encodeURIComponent(op.id), {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signature_path: chemin })
-    });
-    rattacher(op, { signaturePath: chemin });
-    return true;
-  }
-
   if (op.type === 'devis') {
     const nom = (op.nom || 'devis.pdf').replace(/[^\w.\-]/g, '_');
     const chemin = await televerser(cheminFichier(op.id, 'devis-' + nom), dataUrl);
@@ -693,9 +690,7 @@ function rattacher(op, res) {
     ch.nbPhotos = (ch.photos || []).length;
   } else if (op.type === 'devis') {
     ch.devisPath = res.devisPath;
-  } else if (op.type === 'signature') {
-    ch.signaturePath = res.signaturePath;
-  }
+    }
   saveChantiers();
   if (currentChantier && currentChantier.id === op.id && !document.getElementById('viewer')) {
     const flag = document.querySelector('.photo-cell[data-cle="' + op.cle + '"] .photo-flag');
@@ -772,8 +767,7 @@ async function loadFromSheets(silent) {
 }
 
 // Le serveur ne fait pas autorité sur tout : ce qui est encore dans la
-// file d'attente n'y est pas encore monté, et la signature n'est jamais
-// renvoyée en image.
+// file d'attente n'y est pas encore monté.
 function mergeRemote(remote) {
   const pending = pendingIds();
   const local = {};
@@ -783,9 +777,6 @@ function mergeRemote(remote) {
     const l = local[r.id];
     if (!l) return r;
     if (pending.has(r.id)) return l;
-    if (l.signature && l.signature !== 'signed' && r.signature === 'signed') {
-      return Object.assign({}, r, { signature: l.signature });
-    }
     return r;
   });
 
@@ -1077,9 +1068,7 @@ function openChantier(id) {
   const ch = chantiers.find(c => c.id === id);
   if (!ch) { alert('Cette fiche n\'existe plus.'); currentChantier = null; render(); return; }
   currentChantier = ch;
-  sigData = ch.signature || null;
   render();
-  setTimeout(initSig, 150);
 }
 
 function renderDetail(c) {
@@ -1139,8 +1128,6 @@ function renderDetail(c) {
       ? '<div class="alert-success">✅ Chantier terminé' + (enAttente ? '.' : ' — fiche synchronisée.') + '</div>' +
         (ch.notes ? '<div class="field-group"><div class="field-label">Notes</div>' +
           '<div style="font-size:14px;color:var(--noir);line-height:1.5">' + esc(ch.notes) + '</div></div>' : '') +
-        (ch.signature ? '<div class="detail-row"><div class="detail-icon" style="background:var(--green-light)">✍</div>' +
-          '<div><div class="detail-main">Signature enregistrée</div><div class="detail-sub">Client signé</div></div></div>' : '') +
         '<div class="divider"></div>'
       : '<div class="section-title">Compte-rendu de fin de chantier</div>' +
         '<div class="field-group">' +
@@ -1148,16 +1135,6 @@ function renderDetail(c) {
           '<textarea class="field-input" id="notes-field" oninput="saveNotesDraft()" ' +
             'placeholder="Ex : RAS, client satisfait. Broyat déposé au fond du jardin.">' + esc(ch.notes || '') + '</textarea>' +
           '<div class="draft-note" id="notes-draft"></div>' +
-        '</div>' +
-        '<div class="field-group">' +
-          '<div class="field-label">✍ Signature du client</div>' +
-          '<div class="canvas-wrap" id="canvas-wrap">' +
-            '<canvas id="sigCanvas"></canvas>' +
-            '<div class="sig-placeholder" id="sig-placeholder">Faire signer ici →</div>' +
-          '</div>' +
-          '<div style="margin-top:8px">' +
-            '<button class="btn btn-gray" style="padding:10px;font-size:13px;margin-bottom:0" onclick="clearSig()">Effacer la signature</button>' +
-          '</div>' +
         '</div>' +
         '<div class="divider"></div>' +
         '<button class="btn btn-red" onclick="terminer()" id="btn-terminer">✅ Valider et terminer le chantier</button>') +
@@ -1277,12 +1254,17 @@ async function ajouterPhotos() {
   if (!files.length) return;
   const cible = currentChantier;
 
+  let echecs = 0;
   for (const f of files) {
     const dataUrl = await compresser(f);
     const cle = nouvelleCle('ph');
-    await fichierSet(cle, dataUrl);
-    const entree = { cle: cle, path: null, nom: f.name || 'photo.jpg' };
 
+    // fichierSet renvoie null si le stockage local est indisponible.
+    // Empiler la photo malgré tout la ferait disparaître à l'envoi, sans
+    // que personne ne comprenne pourquoi.
+    if (await fichierSet(cle, dataUrl) === null) { echecs++; continue; }
+
+    const entree = { cle: cle, path: null, nom: f.name || 'photo.jpg' };
     if (cible) {
       cible.photos = cible.photos || [];
       cible.photos.push(entree);
@@ -1295,6 +1277,10 @@ async function ajouterPhotos() {
 
   if (cible) saveChantiers();
   render();
+  if (echecs) {
+    alert(echecs + ' photo(s) n\'ont pas pu être enregistrées sur cet appareil.\n\n' +
+          'Fermez les autres onglets de l\'application et réessayez.');
+  }
 }
 
 async function ouvrirViewer(i) {
@@ -1386,83 +1372,16 @@ async function ouvrirDevis() {
 }
 
 // ============================================================
-// SIGNATURE
-// ============================================================
-
-function initSig() {
-  const wrap = document.getElementById('canvas-wrap');
-  const canvas = document.getElementById('sigCanvas');
-  if (!canvas || !wrap) return;
-
-  // Le canvas est dimensionné en CSS à 100 % : sans mise à l'échelle par
-  // devicePixelRatio, le trait est flou sur un écran de téléphone.
-  const dpr = window.devicePixelRatio || 1;
-  const w = wrap.offsetWidth || 400, h = wrap.offsetHeight || 130;
-  canvas.width = w * dpr; canvas.height = h * dpr;
-  sigCtx = canvas.getContext('2d');
-  sigCtx.scale(dpr, dpr);
-  sigCtx.strokeStyle = '#1A1A1A'; sigCtx.lineWidth = 2.5;
-  sigCtx.lineCap = 'round'; sigCtx.lineJoin = 'round';
-
-  if (sigData && sigData !== 'signed') {
-    const img = new Image();
-    img.onload = () => sigCtx.drawImage(img, 0, 0, w, h);
-    img.src = sigData;
-    const ph = document.getElementById('sig-placeholder');
-    if (ph) ph.style.display = 'none';
-  }
-
-  function getPos(e) {
-    const r = canvas.getBoundingClientRect();
-    const src = e.touches ? e.touches[0] : e;
-    return { x: (src.clientX - r.left) * w / r.width, y: (src.clientY - r.top) * h / r.height };
-  }
-  function start(e) {
-    e.preventDefault(); sigDrawing = true; sigLast = getPos(e);
-    const ph = document.getElementById('sig-placeholder'); if (ph) ph.style.display = 'none';
-  }
-  function move(e) {
-    e.preventDefault(); if (!sigDrawing) return;
-    const pos = getPos(e);
-    sigCtx.beginPath(); sigCtx.moveTo(sigLast.x, sigLast.y); sigCtx.lineTo(pos.x, pos.y); sigCtx.stroke();
-    sigLast = pos;
-  }
-  function end(e) {
-    e.preventDefault(); if (!sigDrawing) return;
-    sigDrawing = false;
-    sigData = canvas.toDataURL('image/png');
-    // Persistée tout de suite : une signature client ne se refait pas.
-    if (currentChantier) { currentChantier.signature = sigData; saveChantiers(); }
-  }
-
-  canvas.addEventListener('mousedown', start); canvas.addEventListener('mousemove', move); canvas.addEventListener('mouseup', end);
-  canvas.addEventListener('touchstart', start, { passive: false });
-  canvas.addEventListener('touchmove', move, { passive: false });
-  canvas.addEventListener('touchend', end, { passive: false });
-}
-
-function clearSig() {
-  const c = document.getElementById('sigCanvas');
-  if (sigCtx && c) sigCtx.clearRect(0, 0, c.width, c.height);
-  sigData = null;
-  if (currentChantier) { currentChantier.signature = null; saveChantiers(); }
-  const ph = document.getElementById('sig-placeholder');
-  if (ph) ph.style.display = 'block';
-}
-
-// ============================================================
 // CLÔTURE
 // ============================================================
 
 function terminer() {
   const ch = currentChantier;
   if (!ch) return;
-  if (!sigData) { showModal('signature'); return; }
 
   const el = document.getElementById('notes-field');
   ch.notes = el ? el.value : (ch.notes || '');
   ch.statut = 'Terminé';
-  ch.signature = sigData;
   ch.dateTermine = todayFr();
 
   // Enregistré localement et confirmé tout de suite : le réseau d'un
@@ -1470,51 +1389,33 @@ function terminer() {
   // L'envoi part en tâche de fond via la file d'attente.
   saveChantiers();
   syncChantier(ch);
-
-  // La signature transite par le stockage local comme les photos : la
-  // file ne référence que des clés, jamais les octets eux-mêmes.
-  if (sigData && sigData !== 'signed') {
-    const cle = nouvelleCle('sg');
-    fichierSet(cle, sigData).then(() => enqueue({ type: 'signature', id: ch.id, cle: cle }));
-  }
-
   showModal('success');
 }
 
-function showModal(type) {
+function showModal() {
   const existing = document.getElementById('modal-overlay');
   if (existing) existing.remove();
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay'; overlay.id = 'modal-overlay';
+  const nbPhotos = (currentChantier && currentChantier.photos) ? currentChantier.photos.length : 0;
 
-  if (type === 'success') {
-    overlay.innerHTML = '<div class="modal">' +
-      '<div class="modal-handle"></div>' +
-      '<div class="success-check">✅</div>' +
-      '<div style="text-align:center;font-size:20px;font-weight:700;margin-bottom:8px;color:var(--noir)">Chantier terminé !</div>' +
-      '<div style="text-align:center;font-size:14px;color:#666;margin-bottom:20px">Enregistré sur l\'appareil.</div>' +
-      '<div style="background:var(--green-light);border-radius:10px;padding:14px;margin-bottom:20px;font-size:14px;color:var(--green);line-height:1.8">' +
-        '✓ Statut mis à jour : Terminé<br>' +
-        '✓ ' + ((currentChantier && currentChantier.photos ? currentChantier.photos.length : 0)) + ' photo(s) enregistrée(s)<br>' +
-        '✓ Notes sauvegardées<br>' +
-        '✓ Signature client enregistrée<br>' +
-        '<span id="sync-line">⏳ Envoi au serveur…</span>' +
-      '</div>' +
-      '<button class="btn btn-black" onclick="closeModal();currentChantier=null;render()">Retour à la liste</button>' +
-    '</div>';
-    suivreSync();
-  } else {
-    overlay.innerHTML = '<div class="modal">' +
-      '<div class="modal-handle"></div>' +
-      '<div style="text-align:center;font-size:40px;margin-bottom:12px">✍</div>' +
-      '<div style="text-align:center;font-size:18px;font-weight:700;margin-bottom:8px;color:var(--noir)">Signature manquante</div>' +
-      '<div style="text-align:center;font-size:14px;color:#666;margin-bottom:24px">Merci de faire signer le client avant de valider le chantier.</div>' +
-      '<button class="btn btn-outline-red" onclick="closeModal()">Retour au formulaire</button>' +
-    '</div>';
-  }
+  overlay.innerHTML = '<div class="modal">' +
+    '<div class="modal-handle"></div>' +
+    '<div class="success-check">✅</div>' +
+    '<div style="text-align:center;font-size:20px;font-weight:700;margin-bottom:8px;color:var(--noir)">Chantier terminé !</div>' +
+    '<div style="text-align:center;font-size:14px;color:#666;margin-bottom:20px">Enregistré sur l\'appareil.</div>' +
+    '<div style="background:var(--green-light);border-radius:10px;padding:14px;margin-bottom:20px;font-size:14px;color:var(--green);line-height:1.8">' +
+      '✓ Statut mis à jour : Terminé<br>' +
+      '✓ ' + nbPhotos + ' photo(s) enregistrée(s)<br>' +
+      '✓ Notes sauvegardées<br>' +
+      '<span id="sync-line">⏳ Envoi au serveur…</span>' +
+    '</div>' +
+    '<button class="btn btn-black" onclick="closeModal();currentChantier=null;render()">Retour à la liste</button>' +
+  '</div>';
 
   overlay.addEventListener('click', e => { if (e.target === overlay) closeModal(); });
   document.body.appendChild(overlay);
+  suivreSync();
 }
 
 // La modale s'affiche immédiatement ; cette ligne se met à jour seule
@@ -1629,12 +1530,12 @@ function creerChantier() {
     devis: devisNouveau ? devisNouveau.nom : '—',
     devisCle: devisNouveau ? devisNouveau.cle : null,
     consignes: document.getElementById('n-consignes').value,
-    notes: '', signature: null,
+    notes: '',
     assignes: assignesNouveau.slice(),
     photos: photosNouveau.slice(),
     nbPhotos: photosNouveau.length,
     date: document.getElementById('n-date').value,
-    dateTermine: '', devisPath: null, signaturePath: null
+    dateTermine: '', devisPath: null
   };
 
   chantiers.unshift(nouveau);
