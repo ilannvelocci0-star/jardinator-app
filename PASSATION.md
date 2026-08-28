@@ -76,6 +76,19 @@ Deux choses à savoir si tu touches à `flushQueue()` :
   l'archive dans `jardinator_rejets`, visible dans l'onglet compte. Sans
   ça, une opération impossible bloquait tout ce qui suivait,
   indéfiniment. Ça s'est produit, c'est corrigé, ne le re-casse pas.
+- L'opération traitée est retirée **par identité**, jamais par position
+  (`retirerOp`). Si l'utilisateur agit pendant l'envoi, `enqueue()`
+  remplace l'entrée de tête ; un `slice(1)` jetterait cette nouvelle
+  version sans l'avoir envoyée.
+
+Toute écriture qui passe par `PATCH` ou `DELETE` doit demander
+`Prefer: return=representation` et vérifier qu'une ligne a bougé
+(`patchChantier`). Sans ça, PostgREST renvoie 204 quand RLS n'a laissé
+passer aucune ligne, et la modification est perdue en silence.
+
+L'ajout et le retrait d'une photo passent par les fonctions Postgres
+`ajouter_photo` / `retirer_photo`. Un « lire, modifier, réécrire » côté
+app effacerait la photo qu'un collègue aurait insérée entre les deux.
 
 Les photos et PDF ne transitent pas par la file elle-même : elle ne
 stocke que des clés, les octets sont dans IndexedDB. localStorage
@@ -145,6 +158,11 @@ fonctionnent pas. Ça ressemble à une app cassée alors que non.
 - **Un uuid d'ouvrier supprimé reste dans `assignes`.** Le tableau n'a
   pas de contrainte de clé étrangère, l'app affiche « Ouvrier inconnu ».
   Sans gravité mais pas propre.
+- **Pas de résolution de conflit sur les notes.** Deux ouvriers sur le
+  même chantier : le dernier qui clôture écrase le compte-rendu de
+  l'autre. Les autres champs sont protégés — un ouvrier ne renvoie que
+  `statut`, `notes` et `date_termine`, cf. `versDb()` — mais les notes
+  elles-mêmes restent en dernier-écrit-gagne.
 
 ## Si ça casse
 

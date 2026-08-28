@@ -130,6 +130,60 @@ create policy "chantiers suppression" on public.chantiers
   for delete to authenticated using (public.est_patron());
 
 -- ----------------------------------------------------------------
+-- Ajout et retrait de photos, en une seule instruction
+-- ----------------------------------------------------------------
+-- Le front faisait « lire la liste, ajouter, réécrire ». Entre la
+-- lecture et l'écriture, un collègue sur le même chantier pouvait
+-- insérer sa photo : elle était effacée par la réécriture, et son
+-- fichier restait orphelin dans le bucket. Un seul UPDATE règle le
+-- problème, PostgreSQL sérialisant les écritures sur une même ligne.
+--
+-- Ces fonctions sont en SECURITY INVOKER (le défaut) : les règles RLS
+-- s'appliquent donc normalement, un ouvrier ne peut pas toucher un
+-- chantier qui n'est pas le sien.
+
+create or replace function public.ajouter_photo(p_id text, p_photo jsonb)
+returns jsonb language plpgsql as $$
+declare v jsonb;
+begin
+  update public.chantiers
+     set photos = coalesce(photos, '[]'::jsonb) || jsonb_build_array(p_photo)
+   where id = p_id
+   returning photos into v;
+
+  -- Aucune ligne touchée : chantier supprimé, ou hors de portée de cet
+  -- utilisateur. On le signale au lieu de laisser croire à un succès.
+  if v is null then
+    raise exception 'chantier inaccessible' using errcode = '42501';
+  end if;
+  return v;
+end $$;
+
+create or replace function public.retirer_photo(p_id text, p_path text)
+returns jsonb language plpgsql as $$
+declare v jsonb;
+begin
+  update public.chantiers
+     set photos = coalesce((
+           select jsonb_agg(e)
+             from jsonb_array_elements(coalesce(photos, '[]'::jsonb)) e
+            where e ->> 'path' is distinct from p_path
+         ), '[]'::jsonb)
+   where id = p_id
+   returning photos into v;
+
+  if v is null then
+    raise exception 'chantier inaccessible' using errcode = '42501';
+  end if;
+  return v;
+end $$;
+
+revoke all on function public.ajouter_photo(text, jsonb) from anon;
+revoke all on function public.retirer_photo(text, text)  from anon;
+grant execute on function public.ajouter_photo(text, jsonb) to authenticated;
+grant execute on function public.retirer_photo(text, text)  to authenticated;
+
+-- ----------------------------------------------------------------
 -- Synchronisation instantanée
 -- ----------------------------------------------------------------
 -- Sans cette ligne, l'app ne reçoit rien en direct et retombe sur son

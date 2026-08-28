@@ -339,17 +339,24 @@ function versApp(r) {
 }
 
 function versDb(ch) {
+  // Un ouvrier ne renvoie que ce qu'il a réellement modifié. Sinon,
+  // clôturer à midi avec la copie chargée le matin réécrirait l'adresse
+  // et les consignes dans leur ancienne version, effaçant sans un mot la
+  // correction faite entre-temps par le patron.
   const d = {
-    id: ch.id, statut: ch.statut || 'À faire',
-    client: ch.client || '', adresse: ch.adresse || '',
-    devis: ch.devis === '—' ? '' : (ch.devis || ''),
-    consignes: ch.consignes || '', notes: ch.notes || '',
-    date_prevue: ch.date || '',
+    id: ch.id,
+    statut: ch.statut || 'À faire',
+    notes: ch.notes || '',
     date_termine: ch.statut === 'Terminé' ? (ch.dateTermine || todayFr()) : ''
   };
-  // Seul le patron affecte. Un ouvrier qui enverrait ce champ verrait sa
-  // requête rejetée par la base — autant ne pas l'envoyer du tout.
-  if (estPatron()) d.assignes = ch.assignes || [];
+  if (estPatron()) {
+    d.client = ch.client || '';
+    d.adresse = ch.adresse || '';
+    d.devis = ch.devis === '—' ? '' : (ch.devis || '');
+    d.consignes = ch.consignes || '';
+    d.date_prevue = ch.date || '';
+    d.assignes = ch.assignes || [];
+  }
   return d;
 }
 
@@ -533,6 +540,16 @@ function enqueue(op) {
 // Tout passage par PATCH exige return=representation : sans lui, une
 // mise à jour qu'aucune ligne n'autorise renvoie 204 comme si tout
 // allait bien, et la modification est perdue en silence.
+// Appel d'une fonction Postgres. Les refus RLS y remontent en 403,
+// donc la file les traite comme n'importe quel autre refus définitif.
+function rpc(nom, args) {
+  return sbJson('/rest/v1/rpc/' + nom, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(args)
+  });
+}
+
 async function patchChantier(id, corps) {
   const lignes = await sbJson(REST + '?id=eq.' + encodeURIComponent(id), {
     method: 'PATCH',
@@ -573,14 +590,10 @@ async function executerOp(op) {
     return true;
   }
   if (op.type === 'deletePhoto') {
-    // Retirer le fichier ne suffisait pas : son entrée restait dans la
-    // colonne photos, et la synchro suivante la réaffichait — case morte
-    // sur les autres téléphones, puisque le fichier n'existait plus.
-    const rows = await sbJson(REST + '?select=photos&id=eq.' + encodeURIComponent(op.id));
-    if (rows && rows[0]) {
-      const reste = (rows[0].photos || []).filter(p => p.path !== op.path);
-      await patchChantier(op.id, { photos: reste });
-    }
+    // Retirer le fichier ne suffit pas : sans le retrait de l'entrée, la
+    // synchro suivante réaffiche la photo — case morte sur les autres
+    // téléphones, puisque le fichier n'existe plus.
+    await rpc('retirer_photo', { p_id: op.id, p_path: op.path });
     await supprimerFichier(op.path);
     return true;
   }
@@ -704,17 +717,13 @@ async function envoyerFichier(op, dataUrl) {
     return true;
   }
 
-  // photo
+  // photo — l'ajout à la liste est fait par la base en une instruction.
+  // Un « lire, ajouter, réécrire » côté app effacerait la photo qu'un
+  // collègue aurait insérée entre les deux.
   const chemin = await televerser(cheminFichier(op.id, 'photo-' + op.cle + '.jpg'), dataUrl);
-  // Relecture avant écriture : deux téléphones peuvent ajouter une photo
-  // au même chantier, on ne veut pas que le second écrase la liste du premier.
-  const rows = await sbJson(REST + '?select=photos&id=eq.' + encodeURIComponent(op.id));
-  const liste = (rows && rows[0] && Array.isArray(rows[0].photos)) ? rows[0].photos : [];
-  if (!liste.some(p => p.path === chemin)) liste.push({ path: chemin, nom: op.nom || 'photo.jpg', cle: op.cle });
-  await sbJson(REST + '?id=eq.' + encodeURIComponent(op.id), {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ photos: liste })
+  await rpc('ajouter_photo', {
+    p_id: op.id,
+    p_photo: { path: chemin, nom: op.nom || 'photo.jpg', cle: op.cle }
   });
   rattacher(op, { path: chemin });
   return true;
@@ -1368,6 +1377,7 @@ async function ajouterPhotos() {
       enqueue({ type: 'photo', id: cible.id, cle: cle, nom: entree.nom });
     } else {
       photosNouveau.push(entree);
+      saveNouveauDraft();
     }
   }
 
@@ -1438,6 +1448,7 @@ async function joindreDevis() {
     enqueue({ type: 'devis', id: currentChantier.id, cle: cle, nom: f.name });
   } else {
     devisNouveau = { cle: cle, nom: f.name };
+    saveNouveauDraft();
   }
   render();
 }
@@ -1553,11 +1564,14 @@ function renderNouveau(c) {
   const today = new Date().toISOString().split('T')[0];
   let d = {};
   try { d = JSON.parse(localStorage.getItem(DRAFT_KEY) || '{}'); } catch (e) {}
+  if (Array.isArray(d.__photos)) photosNouveau = d.__photos;
+  if (d.__devis) devisNouveau = d.__devis;
   const enCours = d['n-statut'] === 'En cours';
 
   c.innerHTML =
     '<div style="font-size:20px;font-weight:700;color:var(--noir);margin-bottom:18px">Nouveau chantier</div>' +
-    (Object.keys(d).length ? '<div class="alert-info">📝 Brouillon repris automatiquement.</div>' : '') +
+    (DRAFT_FIELDS.some(k => d[k]) || photosNouveau.length || devisNouveau
+      ? '<div class="alert-info">📝 Brouillon repris automatiquement.</div>' : '') +
     '<div class="field-group"><div class="field-label">Nom du client *</div>' +
       '<input class="field-input" id="n-client" placeholder="Ex : Jean Martin" autocomplete="name" value="' + esc(d['n-client'] || '') + '"></div>' +
     '<div class="field-group"><div class="field-label">Adresse d\'intervention *</div>' +
@@ -1578,7 +1592,7 @@ function renderNouveau(c) {
       (devisNouveau
         ? '<div class="file-chip"><span style="font-size:20px">📄</span>' +
           '<span class="file-chip-name">' + esc(devisNouveau.nom) + '</span>' +
-          '<span class="file-chip-x" onclick="devisNouveau=null;render()">×</span></div>'
+          '<span class="file-chip-x" onclick="devisNouveau=null;saveNouveauDraft();render()">×</span></div>'
         : '<button class="gps-btn" onclick="joindreDevis()">📎 Joindre le devis (PDF)</button>') +
     '</div>' +
     '<div class="field-group"><div class="field-label">📷 Photos (' + photosNouveau.length + ')</div>' +
@@ -1599,6 +1613,12 @@ function saveNouveauDraft() {
     const el = document.getElementById(id);
     if (el && el.value) d[id] = el.value;
   });
+  // Les octets sont déjà en base locale sous ces clés ; il suffit de
+  // retenir les clés. Ouvrir l'appareil photo fait très souvent
+  // recharger la page sur iPhone : sans ça, on retrouvait le texte mais
+  // plus aucune photo, et les blobs restaient orphelins.
+  d.__photos = photosNouveau;
+  d.__devis = devisNouveau;
   localStorage.setItem(DRAFT_KEY, JSON.stringify(d));
   clearTimeout(nouveauTimer);
   nouveauTimer = setTimeout(() => {

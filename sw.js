@@ -2,7 +2,7 @@
 // index.html : la page elle-même est servie réseau d'abord, donc elle se
 // met à jour seule, mais le logo, les icônes et le manifeste sont servis
 // depuis le cache. Changer cette valeur purge tout d'un coup.
-const CACHE_VERSION = 'v4';
+const CACHE_VERSION = 'v5';
 const CACHE_NAME = 'jardinator-' + CACHE_VERSION;
 
 // Chemins relatifs : le SW est servi depuis la racine de l'app, donc
@@ -38,14 +38,28 @@ self.addEventListener('fetch', e => {
   // Navigation : réseau d'abord. En cache-first, une nouvelle version de
   // l'app n'atteignait jamais les téléphones déjà installés.
   if (req.mode === 'navigate') {
+    const versionCache = () => caches.match(req).then(r => r || caches.match('./index.html'));
+
     e.respondWith(
-      fetch(req)
-        .then(res => {
-          const copy = res.clone();
-          caches.open(CACHE_NAME).then(c => c.put(req, copy));
+      Promise.race([
+        fetch(req).then(res => {
+          // Ne mettre en cache que les réponses valides : une page
+          // d'erreur mémorisée serait ensuite servie hors ligne comme si
+          // c'était l'application.
+          if (res && res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE_NAME).then(c => c.put(req, copy));
+          }
           return res;
-        })
-        .catch(() => caches.match(req).then(r => r || caches.match('./index.html')))
+        }),
+        // Un réseau de chantier qui répond sans jamais conclure — 2G,
+        // portail captif — laissait l'écran blanc pendant tout le délai
+        // TCP, alors que l'app était en cache. Au-delà de 4 s, on sert
+        // la copie locale.
+        new Promise(r => setTimeout(() => r(null), 4000))
+      ])
+        .then(res => res || versionCache())
+        .catch(versionCache)
     );
     return;
   }
