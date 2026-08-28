@@ -2,14 +2,14 @@
 // index.html : la page elle-même est servie réseau d'abord, donc elle se
 // met à jour seule, mais le logo, les icônes et le manifeste sont servis
 // depuis le cache. Changer cette valeur purge tout d'un coup.
-const CACHE_VERSION = 'v10';
+const CACHE_VERSION = 'v11';
 const CACHE_NAME = 'jardinator-' + CACHE_VERSION;
 
 // Chemins relatifs : le SW est servi depuis la racine de l'app, donc
 // ils suivent l'hébergement. L'ancienne version codait en dur
 // « /jardinator-app/ » et retombait sur « /index.html » — un chemin qui
 // n'était jamais en cache, donc pas de mode hors-ligne du tout.
-const ASSETS = ['./', './index.html', './manifest.json', './logo.jpg', './icon-192.png', './icon-512.png'];
+const ASSETS = ['./', './index.html', './manifest.json', './logo.jpg', './icon-192.png', './icon-512.png', './qr-site.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(

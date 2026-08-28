@@ -17,6 +17,7 @@ create table if not exists public.chantiers (
   statut         text not null default 'À faire',
   client         text not null default '',
   adresse        text not null default '',
+  telephone      text not null default '',   -- appel direct depuis le chantier
   devis          text not null default '',    -- nom lisible du fichier
   devis_path     text,                        -- chemin dans le bucket
   consignes      text not null default '',
@@ -47,6 +48,9 @@ alter table public.chantiers
 
 alter table public.chantiers
   add column if not exists materiel text[] not null default '{}';
+
+alter table public.chantiers
+  add column if not exists telephone text not null default '';
 
 -- Les règles de sécurité sont recréées plus bas, mais il faut les
 -- retirer DÈS MAINTENANT : celles de la version précédente référencent

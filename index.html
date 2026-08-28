@@ -79,6 +79,34 @@ textarea.field-input{min-height:90px;resize:vertical}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .draft-note{font-size:12px;color:var(--green);margin-top:6px;min-height:16px}
 .queue-banner{background:var(--amber-light);color:var(--amber);padding:9px 14px;font-size:13px;text-align:center;font-weight:500}
+/* ---- Compte-rendu remis au client ----------------------------------
+   Charte du site jardinatorpaysage.fr, volontairement différente de
+   celle de l'app : ce document sort de l'entreprise, il doit ressembler
+   au site, pas à l'outil interne. */
+#cr{display:none}
+@media print{
+  body>*{display:none!important}
+  body{max-width:none;background:white}
+  #cr{display:block!important;font-family:Georgia,'Times New Roman',serif;color:#191714}
+  @page{size:A4;margin:14mm}
+}
+#cr .cr-tete{display:flex;align-items:center;gap:14px;border-bottom:3px solid #E46265;padding-bottom:12px}
+#cr .cr-logo{width:64px;height:64px;border-radius:50%;border:2px solid #E46265;overflow:hidden;flex-shrink:0}
+#cr .cr-logo img{width:100%;height:100%;object-fit:cover}
+#cr .cr-nom{font-size:23px;font-weight:700;letter-spacing:.04em;color:#191714}
+#cr .cr-metier{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:#84383A;margin-top:2px}
+#cr .cr-ref{margin-left:auto;text-align:right;font-size:11px;color:#6b665f;line-height:1.6}
+#cr h2{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#84383A;margin:20px 0 7px;font-family:-apple-system,sans-serif}
+#cr .cr-bloc{background:#FAF9F5;border-left:3px solid #E46265;padding:11px 14px;font-size:13px;line-height:1.65}
+#cr .cr-client{font-size:19px;font-weight:700}
+#cr .cr-notes{font-size:13.5px;line-height:1.7;white-space:pre-wrap}
+#cr .cr-photos{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}
+#cr .cr-photos img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:3px;border:1px solid #e6e2da}
+#cr .cr-pied{margin-top:22px;border-top:1px solid #ddd8cf;padding-top:12px;display:flex;gap:18px;align-items:flex-start}
+#cr .cr-legal{font-size:9.5px;color:#6b665f;line-height:1.75;flex:1}
+#cr .cr-qr{text-align:center;flex-shrink:0}
+#cr .cr-qr img{width:88px;height:88px;display:block}
+#cr .cr-qr div{font-size:9px;color:#6b665f;margin-top:4px;letter-spacing:.04em}
 .jour{display:flex;align-items:baseline;gap:8px;margin:18px 0 8px;padding-bottom:5px;border-bottom:1px solid #e0dbd6}
 .jour-nom{font-size:14px;font-weight:700;color:var(--noir);text-transform:capitalize}
 .jour-nb{font-size:12px;color:#999;margin-left:auto}
@@ -133,6 +161,8 @@ textarea.field-input{min-height:90px;resize:vertical}
     <div id="pwd-error" style="color:#E74C3C;font-size:13px;text-align:center;margin-top:10px;display:none"></div>
   </div>
 </div>
+
+<div id="cr"></div>
 
 <div id="app" style="display:none">
   <div class="topbar">
@@ -343,6 +373,7 @@ function supprimerFichier(chemin) {
 function versApp(r) {
   return {
     id: r.id, statut: r.statut, client: r.client, adresse: r.adresse,
+    telephone: r.telephone || '',
     devis: r.devis || '', devisPath: r.devis_path || null,
     consignes: r.consignes || '', notes: r.notes || '',
     date: r.date_prevue || '', dateTermine: r.date_termine || '',
@@ -368,6 +399,7 @@ function versDb(ch) {
   if (estPatron()) {
     d.client = ch.client || '';
     d.adresse = ch.adresse || '';
+    d.telephone = ch.telephone || '';
     d.devis = ch.devis === '—' ? '' : (ch.devis || '');
     d.consignes = ch.consignes || '';
     d.date_prevue = ch.date || '';
@@ -1177,6 +1209,26 @@ function badgeHtml(s) {
 // LISTE
 // ============================================================
 
+let recherche = '';
+
+// Accents et casse ignorés : « ecole » doit trouver « École », sinon la
+// recherche est inutilisable au pouce sur un clavier de téléphone.
+function normaliser(t) {
+  return String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+function setRecherche(v) {
+  recherche = v;
+  const c = document.getElementById('content');
+  const champ = document.getElementById('champ-recherche');
+  const pos = champ ? champ.selectionStart : null;
+  renderList(c);
+  // On rend la main au champ : sans ça, le clavier se referme à chaque
+  // lettre tapée.
+  const neuf = document.getElementById('champ-recherche');
+  if (neuf) { neuf.focus(); if (pos !== null) neuf.setSelectionRange(pos, pos); }
+}
+
 function renderList(c) {
   const patron = estPatron();
 
@@ -1187,6 +1239,15 @@ function renderList(c) {
     ? (filterStatut === 'tous' ? chantiers : chantiers.filter(ch => ch.statut === filterStatut))
     : chantiers.filter(ch => ch.statut === 'À faire' || ch.statut === 'En cours');
 
+  const q = normaliser(recherche);
+  const listeFiltree = q
+    ? list.filter(ch => normaliser(ch.client + ' ' + ch.adresse).indexOf(q) > -1)
+    : list;
+
+  const champRecherche =
+    '<input class="field-input" id="champ-recherche" type="search" placeholder="Rechercher un client ou une adresse" ' +
+    'style="margin-bottom:12px" value="' + esc(recherche) + '" oninput="setRecherche(this.value)">';
+
   const chips = patron
     ? '<div class="chips">' + ['tous', 'À faire', 'En cours', 'Terminé'].map(s =>
         '<div class="chip ' + (filterStatut === s ? 'active' : '') + '" onclick="setFilter(\'' + esc(s) + '\')">' +
@@ -1194,7 +1255,7 @@ function renderList(c) {
     : '';
 
   const pending = pendingIds();
-  let cards = list.map(ch =>
+  let cards = listeFiltree.map(ch =>
     '<div class="card" data-id="' + esc(ch.id) + '">' +
       '<div class="card-header"><div class="card-name">' + esc(ch.client) + '</div>' + badgeHtml(ch.statut) + '</div>' +
       '<div class="card-address">📍 ' + esc(ch.adresse) + '</div>' +
@@ -1210,14 +1271,16 @@ function renderList(c) {
       '</div>' +
     '</div>').join('');
 
-  if (!list.length) {
+  if (!listeFiltree.length) {
     cards = '<div class="empty-state"><div style="font-size:48px;margin-bottom:12px">🌹</div>' +
-      '<div style="font-size:16px;font-weight:500">Aucun chantier</div>' +
-      (!patron ? '<div style="font-size:14px;margin-top:6px">Aucun chantier ne t\'est assigné pour le moment</div>' : '') + '</div>';
+      '<div style="font-size:16px;font-weight:500">' +
+        (q ? 'Aucun résultat pour « ' + esc(recherche) + ' »' : 'Aucun chantier') + '</div>' +
+      (!q && !patron ? '<div style="font-size:14px;margin-top:6px">Aucun chantier ne t\'est assigné pour le moment</div>' : '') + '</div>';
   }
 
   const title = patron ? 'Tous les chantiers' : "Mes chantiers à faire";
-  c.innerHTML = '<div class="section-title">' + title + ' (' + list.length + ')</div>' + chips + cards;
+  c.innerHTML = '<div class="section-title">' + title + ' (' + listeFiltree.length + ')</div>' +
+                champRecherche + chips + cards;
 }
 
 function setFilter(f) { filterStatut = f; render(); }
@@ -1241,6 +1304,34 @@ function openChantier(id) {
   render();
 }
 
+// Passages précédents chez le même client. Rapproché sur le nom
+// normalisé : les fiches n'ont pas d'identifiant client, chaque chantier
+// est saisi indépendamment.
+function historiqueDe(ch) {
+  const cible = normaliser(ch.client);
+  if (!cible) return [];
+  return chantiers
+    .filter(c => c.id !== ch.id && normaliser(c.client) === cible)
+    .sort((a, b) => (b.date || '') < (a.date || '') ? -1 : 1);
+}
+
+function renderHistorique(ch) {
+  const passes = historiqueDe(ch);
+  if (!passes.length) return '';
+  return '<div class="divider"></div>' +
+    '<div class="section-title">Déjà intervenus chez ce client (' + passes.length + ')</div>' +
+    passes.slice(0, 8).map(p =>
+      '<div class="pl-item' + (p.statut === 'Terminé' ? ' fait' : '') + '" data-id="' + esc(p.id) + '">' +
+        '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">' +
+          '<div style="min-width:0">' +
+            '<div class="pl-client">' + esc(p.date ? dateLisible(p.date) : 'Sans date') + '</div>' +
+            (p.notes ? '<div class="pl-info">' + esc(p.notes.slice(0, 90)) + (p.notes.length > 90 ? '…' : '') + '</div>' : '') +
+            ((p.photos || []).length ? '<div class="pl-info">📷 ' + p.photos.length + ' photo(s)</div>' : '') +
+          '</div>' + badgeHtml(p.statut) +
+        '</div></div>').join('') +
+    (passes.length > 8 ? '<div style="font-size:12px;color:#999">et ' + (passes.length - 8) + ' de plus…</div>' : '');
+}
+
 function renderDetail(c) {
   const ch = currentChantier;
   const isTermine = ch.statut === 'Terminé';
@@ -1258,6 +1349,12 @@ function renderDetail(c) {
       '<div><div class="detail-main">' + esc(ch.adresse) + '</div><div class="detail-sub">Adresse d\'intervention</div></div>' +
     '</div>' +
     '<button class="gps-btn" onclick="openGPS()">🗺 Naviguer vers ce chantier</button>' +
+    // Le besoin le plus courant sur place : personne au portail, il faut
+    // pouvoir appeler sans quitter l'application ni chercher le numéro.
+    (ch.telephone
+      ? '<a class="gps-btn" style="background:var(--green-light);color:var(--green);text-decoration:none" ' +
+        'href="tel:' + esc(String(ch.telephone).replace(/[^0-9+]/g, '')) + '">📞 Appeler ' + esc(ch.client) + ' · ' + esc(ch.telephone) + '</a>'
+      : '') +
     // Affectation : menu déroulant pour le patron, simple information
     // pour l'ouvrier — qui ne voit de toute façon que ses chantiers.
     (estPatron()
@@ -1273,6 +1370,11 @@ function renderDetail(c) {
           : '')) +
     (estPatron()
       ? '<div class="field-group" style="margin-top:12px">' +
+        '<div class="field-label">📞 Téléphone du client</div>' +
+        '<input class="field-input" type="tel" id="tel-fiche" value="' + esc(ch.telephone || '') + '" ' +
+          'placeholder="Ex : 06 12 34 56 78" onchange="changerTelephone(this.value)">' +
+        '<div class="draft-note" id="tel-note"></div></div>' +
+        '<div class="field-group">' +
         '<div class="field-label">📅 Date prévue</div>' +
         '<input class="field-input" type="date" id="date-fiche" value="' + esc(ch.date || '') + '" ' +
           'onchange="changerDate(this.value)">' +
@@ -1329,6 +1431,10 @@ function renderDetail(c) {
         '</div>' +
         '<div class="divider"></div>' +
         '<button class="btn btn-red" onclick="terminer()" id="btn-terminer">✅ Valider et terminer le chantier</button>') +
+    (ch.statut === 'Terminé'
+      ? '<button class="btn btn-black" id="btn-cr" onclick="imprimerCompteRendu()">🖨 Compte-rendu pour le client</button>'
+      : '') +
+    renderHistorique(ch) +
     // Réservé au patron : la base refuse la suppression aux ouvriers, et
     // proposer le geste leur ferait croire à un succès.
     (estPatron()
@@ -1339,6 +1445,15 @@ function renderDetail(c) {
 // La date prévue ne pouvait être fixée qu'à la création : un chantier
 // reporté pour cause de pluie restait bloqué à son ancienne date, et
 // apparaissait indéfiniment en retard dans le planning.
+function changerTelephone(val) {
+  if (!currentChantier) return;
+  currentChantier.telephone = val.trim();
+  saveChantiers();
+  syncChantier(currentChantier);
+  const n = document.getElementById('tel-note');
+  if (n) { n.textContent = '✓ Enregistré'; setTimeout(() => { if (n) n.textContent = ''; }, 1500); }
+}
+
 function changerDate(val) {
   if (!currentChantier) return;
   currentChantier.date = val;
@@ -1713,7 +1828,7 @@ function closeModal() { const el = document.getElementById('modal-overlay'); if 
 // ============================================================
 
 const DRAFT_KEY = 'jardinator_draft_nouveau';
-const DRAFT_FIELDS = ['n-client', 'n-adresse', 'n-date', 'n-statut', 'n-consignes'];
+const DRAFT_FIELDS = ['n-client', 'n-adresse', 'n-tel', 'n-date', 'n-statut', 'n-consignes'];
 
 function renderNouveau(c) {
   const today = new Date().toISOString().split('T')[0];
@@ -1740,6 +1855,8 @@ function renderNouveau(c) {
       '<input class="field-input" id="n-client" placeholder="Ex : Jean Martin" autocomplete="name" value="' + esc(d['n-client'] || '') + '"></div>' +
     '<div class="field-group"><div class="field-label">Adresse d\'intervention *</div>' +
       '<input class="field-input" id="n-adresse" placeholder="Ex : 12 Rue des Érables, 69003 Lyon" autocomplete="street-address" value="' + esc(d['n-adresse'] || '') + '"></div>' +
+    '<div class="field-group"><div class="field-label">Téléphone du client</div>' +
+      '<input class="field-input" type="tel" id="n-tel" placeholder="Ex : 06 12 34 56 78" autocomplete="tel" value="' + esc(d['n-tel'] || '') + '"></div>' +
     '<div class="field-group"><div class="field-label">Date prévue</div>' +
       '<input class="field-input" type="date" id="n-date" value="' + esc(d['n-date'] || today) + '"></div>' +
     '<div class="field-group"><div class="field-label">Statut</div>' +
@@ -1817,6 +1934,7 @@ function creerChantier() {
     statut: document.getElementById('n-statut').value,
     client: client,
     adresse: adresse,
+    telephone: (document.getElementById('n-tel') || {}).value || '',
     devis: devisNouveau ? devisNouveau.nom : '—',
     devisCle: devisNouveau ? devisNouveau.cle : null,
     consignes: document.getElementById('n-consignes').value,
@@ -1844,6 +1962,93 @@ function creerChantier() {
   assignesNouveau = [];
   materielNouveau = [];
   apresClic(() => switchTab('chantiers'));
+}
+
+// ============================================================
+// COMPTE-RENDU REMIS AU CLIENT
+// ============================================================
+//
+// Passe par l'impression du navigateur plutôt qu'une bibliothèque PDF :
+// zéro kilo-octet ajouté, et le rendu est exactement celui décrit en CSS.
+// Sur iPhone : Partager → Imprimer → pincer pour agrandir → PDF.
+
+const ENTREPRISE = {
+  nom: 'Jardinator Paysage',
+  metier: 'Paysagiste · Élagage · Entretien',
+  adresse: '74 rue du Bel Air, 95630 Mériel',
+  tel: '06 88 66 94 04',
+  mail: 'jardinatorpaysage@gmail.com',
+  site: 'jardinatorpaysage.fr',
+  insta: '@jardinatorpaysage',
+  legal: 'SAS au capital de 1 000 € · RCS Pontoise 928 522 325 · TVA FR42928522325'
+};
+
+async function imprimerCompteRendu() {
+  const ch = currentChantier;
+  if (!ch) return;
+
+  const btn = document.getElementById('btn-cr');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Préparation…'; }
+
+  // Les vignettes viennent du cache local ou du serveur : il faut les
+  // avoir toutes avant d'ouvrir la fenêtre d'impression, sinon la page
+  // part avec des cadres vides.
+  const srcs = [];
+  for (const ph of (ch.photos || [])) {
+    const src = await photoSrc(ph);
+    if (src) srcs.push(src);
+  }
+
+  const ligne = (label, valeur) => valeur
+    ? '<div><span style="color:#6b665f">' + label + '</span> ' + esc(valeur) + '</div>' : '';
+
+  document.getElementById('cr').innerHTML =
+    '<div class="cr-tete">' +
+      '<div class="cr-logo"><img src="logo.jpg" alt=""></div>' +
+      '<div><div class="cr-nom">' + esc(ENTREPRISE.nom.toUpperCase()) + '</div>' +
+        '<div class="cr-metier">' + esc(ENTREPRISE.metier) + '</div></div>' +
+      '<div class="cr-ref">Compte-rendu d\'intervention<br><strong>' + esc(ch.id) + '</strong><br>' +
+        esc(ch.dateTermine || dateLisible(ch.date) || '') + '</div>' +
+    '</div>' +
+
+    '<h2>Client</h2>' +
+    '<div class="cr-bloc">' +
+      '<div class="cr-client">' + esc(ch.client) + '</div>' +
+      ligne('', ch.adresse) + ligne('Tél.', ch.telephone) +
+    '</div>' +
+
+    '<h2>Intervention</h2>' +
+    '<div class="cr-bloc">' +
+      ligne('Date prévue :', dateLisible(ch.date)) +
+      ligne('Réalisée le :', ch.dateTermine) +
+      ligne('Intervenants :', (ch.assignes || []).map(nomDe).join(', ')) +
+      ligne('Matériel :', (ch.materiel || []).join(', ')) +
+      ligne('Consignes :', ch.consignes) +
+    '</div>' +
+
+    (ch.notes
+      ? '<h2>Travaux réalisés</h2><div class="cr-notes">' + esc(ch.notes) + '</div>' : '') +
+
+    (srcs.length
+      ? '<h2>Photos du chantier</h2><div class="cr-photos">' +
+        srcs.slice(0, 9).map(u => '<img src="' + u + '" alt="">').join('') + '</div>' : '') +
+
+    '<div class="cr-pied">' +
+      '<div class="cr-legal">' +
+        '<strong>' + esc(ENTREPRISE.nom) + '</strong> — ' + esc(ENTREPRISE.adresse) + '<br>' +
+        esc(ENTREPRISE.tel) + ' · ' + esc(ENTREPRISE.mail) + '<br>' +
+        esc(ENTREPRISE.site) + ' · Instagram ' + esc(ENTREPRISE.insta) + '<br>' +
+        esc(ENTREPRISE.legal) +
+      '</div>' +
+      '<div class="cr-qr"><img src="qr-site.png" alt="">' +
+        '<div>Nos réalisations</div></div>' +
+    '</div>';
+
+  if (btn) { btn.disabled = false; btn.textContent = '🖨 Compte-rendu pour le client'; }
+
+  // Laisse au navigateur le temps de décoder les images avant d'ouvrir
+  // la fenêtre d'impression.
+  setTimeout(() => window.print(), 350);
 }
 
 // ============================================================
