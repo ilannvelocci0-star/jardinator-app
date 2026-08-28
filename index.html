@@ -585,9 +585,14 @@ function messageRefus(statut) {
   return "Refusé par le serveur (code " + statut + ").";
 }
 
-let flushing = false;
+let flushing = false, relanceDemandee = false;
 async function flushQueue() {
-  if (flushing || !CONFIGURED || !session || !navigator.onLine) return;
+  // Un envoi est déjà en cours : on note qu'il faudra recommencer plutôt
+  // que d'abandonner. Sans ça, une opération empilée pendant l'envoi
+  // (typiquement la signature, ajoutée juste après la fiche) attendait
+  // le prochain passage automatique.
+  if (flushing) { relanceDemandee = true; return; }
+  if (!CONFIGURED || !session || !navigator.onLine) return;
   flushing = true;
   try {
     let q = getQueue();
@@ -630,6 +635,7 @@ async function flushQueue() {
   } finally {
     flushing = false;
     updateQueueBanner();
+    if (relanceDemandee) { relanceDemandee = false; setTimeout(flushQueue, 0); }
   }
 }
 
@@ -814,7 +820,7 @@ function updateRefreshIndicator(ok) {
 // Conservé même avec le temps réel : c'est le filet si le WebSocket
 // tombe, ou si le réseau du camion coupe la connexion permanente.
 setInterval(() => { if (!isEditing()) loadFromSheets(true); }, 30000);
-setInterval(flushQueue, 15000);
+setInterval(flushQueue, 5000);
 
 // ============================================================
 // TEMPS RÉEL
