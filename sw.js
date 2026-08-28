@@ -1,6 +1,8 @@
-// ⚠ Bump CACHE_VERSION à chaque mise en ligne : c'est ce qui déclenche
-// la purge de l'ancien cache sur les téléphones déjà installés.
-const CACHE_VERSION = 'v3';
+// Incrémenter à chaque mise en ligne qui touche autre chose que
+// index.html : la page elle-même est servie réseau d'abord, donc elle se
+// met à jour seule, mais le logo, les icônes et le manifeste sont servis
+// depuis le cache. Changer cette valeur purge tout d'un coup.
+const CACHE_VERSION = 'v4';
 const CACHE_NAME = 'jardinator-' + CACHE_VERSION;
 
 // Chemins relatifs : le SW est servi depuis la racine de l'app, donc

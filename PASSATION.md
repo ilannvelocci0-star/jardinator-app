@@ -104,10 +104,11 @@ n'est pas technique.
 assumé pour que les gars puissent les taper sur un téléphone de chantier.
 À changer au moins quand quelqu'un part.
 
-**Le Service Worker met en cache l'app.** Si tu déploies sans incrémenter
-`CACHE_VERSION` dans `sw.js`, les téléphones déjà installés continueront
-de servir l'ancienne version indéfiniment. C'est le bug le plus pénible à
-diagnostiquer parce que ça marche très bien sur ta machine.
+**Le Service Worker met en cache l'app.** `index.html` est servi réseau
+d'abord, donc il se met à jour tout seul. En revanche le logo, les icônes
+et le manifeste viennent du cache : si tu les modifies sans incrémenter
+`CACHE_VERSION` dans `sw.js`, les téléphones déjà installés garderont les
+anciens. Pénible à diagnostiquer parce que tout marche sur ta machine.
 
 **L'ancien backend Google Apps Script est encore déployé et ouvert à
 tous.** Il ne sert plus à rien depuis la bascule vers Supabase, mais
