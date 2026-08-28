@@ -751,7 +751,10 @@ function isEditing() {
 
 async function loadFromSheets(silent) {
   if (!CONFIGURED || !session) { chantiers = loadLocal(); render(); return; }
-  if (!silent) showLoader();
+  // Le voile remplace tout le contenu. Par-dessus une fiche ouverte, il
+  // effacerait la saisie en cours et l'écran resterait bloqué dessus,
+  // puisque le rendu final est justement inhibé pendant une saisie.
+  if (!silent && !currentChantier) showLoader();
   const avantIds = new Set(chantiers.map(c => c.id));
   try {
     const rows = await sbJson(REST + '?select=*&order=maj_le.desc');
@@ -776,7 +779,12 @@ function mergeRemote(remote) {
   const merged = remote.map(r => {
     const l = local[r.id];
     if (!l) return r;
+    // La version locale l'emporte tant qu'elle n'est pas montée, et tant
+    // que la fiche est ouverte à l'écran : sinon currentChantier
+    // pointerait sur un objet que le tableau ne contient plus, et les
+    // modifications suivantes partiraient dans le vide.
     if (pending.has(r.id)) return l;
+    if (currentChantier && currentChantier.id === r.id) return l;
     return r;
   });
 
@@ -944,8 +952,10 @@ function appliquerRole() {
 }
 
 // Liste des ouvriers pour le menu « Assigné à ». Inutile côté terrain.
+// Chargée pour tout le monde : l'ouvrier en a besoin pour lire le nom
+// des collègues affectés au même chantier. La vue n'expose que
+// identifiant, prénom et rôle.
 async function chargerEquipe() {
-  if (!estPatron()) return;
   try {
     equipe = (await sbJson('/rest/v1/equipe?select=id,nom,role&order=nom')) || [];
   } catch (e) { equipe = []; }
@@ -1421,10 +1431,16 @@ function showModal() {
 // La modale s'affiche immédiatement ; cette ligne se met à jour seule
 // quand la file d'attente s'est vidée.
 function suivreSync() {
+  // Une opération refusée quitte la file elle aussi : sans ce repère,
+  // la modale annoncerait « synchronisé » sur un envoi rejeté.
+  const rejetsAvant = getRejets().length;
   const tick = setInterval(() => {
     const line = document.getElementById('sync-line');
     if (!line) { clearInterval(tick); return; }
-    if (!getQueue().length) {
+    if (getRejets().length > rejetsAvant) {
+      line.textContent = '⚠ Envoi refusé — voir ' + (estPatron() ? 'Dashboard' : 'Mon compte');
+      clearInterval(tick);
+    } else if (!getQueue().length) {
       line.textContent = '✓ Fiche synchronisée';
       clearInterval(tick);
     } else if (!navigator.onLine) {
