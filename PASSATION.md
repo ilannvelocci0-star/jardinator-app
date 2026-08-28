@@ -195,6 +195,25 @@ fonctionnent pas. Ça ressemble à une app cassée alors que non.
   `statut`, `notes` et `date_termine`, cf. `versDb()` — mais les notes
   elles-mêmes restent en dernier-écrit-gagne.
 
+## Planning
+
+Onglet **Planning**, visible des deux rôles : les chantiers regroupés par
+jour, semaine par semaine, avec un bloc « En retard » et un bloc « Sans
+date prévue ». Rien n'est stocké de plus — tout se calcule à partir de
+`date_prevue` sur les fiches déjà en mémoire.
+
+C'est volontairement une liste et pas une grille de calendrier : sur un
+téléphone de chantier, un mois en sept colonnes est illisible, et c'est
+ce qui alourdit ce genre d'écran. Aucune bibliothèque, ~150 lignes.
+
+Le bloc « En retard » exclut les chantiers dont le jour figure déjà dans
+la semaine affichée, sinon ils apparaîtraient deux fois et donneraient
+l'impression qu'il y a plus de travail qu'en réalité.
+
+La date prévue se modifie depuis la fiche, côté patron uniquement — un
+chantier reporté pour cause de pluie doit pouvoir changer de jour, sans
+quoi il reste indéfiniment en retard.
+
 ## Entretien annuel
 
 Le Dashboard du patron a une section **Entretien** qui affiche le nombre

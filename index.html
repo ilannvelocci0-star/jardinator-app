@@ -79,6 +79,20 @@ textarea.field-input{min-height:90px;resize:vertical}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .draft-note{font-size:12px;color:var(--green);margin-top:6px;min-height:16px}
 .queue-banner{background:var(--amber-light);color:var(--amber);padding:9px 14px;font-size:13px;text-align:center;font-weight:500}
+.jour{display:flex;align-items:baseline;gap:8px;margin:18px 0 8px;padding-bottom:5px;border-bottom:1px solid #e0dbd6}
+.jour-nom{font-size:14px;font-weight:700;color:var(--noir);text-transform:capitalize}
+.jour-nb{font-size:12px;color:#999;margin-left:auto}
+.jour.aujourdhui{border-bottom-color:var(--rouge)}
+.jour.aujourdhui .jour-nom{color:var(--rouge)}
+.jour-vide{font-size:13px;color:#bbb;padding:6px 0 2px}
+.pl-item{background:white;border:0.5px solid #ddd;border-left:3px solid var(--rouge);border-radius:10px;padding:10px 12px;margin-bottom:8px;cursor:pointer}
+.pl-item.fait{opacity:.55;border-left-color:var(--green)}
+.pl-item.retard{border-left-color:var(--amber)}
+.pl-client{font-size:15px;font-weight:600;color:var(--noir)}
+.pl-info{font-size:12px;color:#777;margin-top:2px}
+.nav-semaine{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.nav-semaine button{background:white;border:1px solid #ddd;border-radius:10px;padding:9px 13px;font-size:16px;cursor:pointer;color:var(--noir)}
+.nav-semaine .libelle{flex:1;text-align:center;font-size:14px;font-weight:600;color:var(--noir)}
 
 .photo-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}
 .photo-cell{position:relative;aspect-ratio:1;border-radius:10px;overflow:hidden;background:#eee9e4;border:0.5px solid #ddd;display:flex;align-items:center;justify-content:center;cursor:pointer}
@@ -1061,9 +1075,11 @@ function appliquerRole() {
 
   document.getElementById('tab-bar').innerHTML = patron
     ? '<div class="tab active" id="tab-chantiers" onclick="switchTab(\'chantiers\')">Chantiers</div>' +
+      '<div class="tab" id="tab-planning" onclick="switchTab(\'planning\')">Planning</div>' +
       '<div class="tab" id="tab-nouveau" onclick="switchTab(\'nouveau\')">+ Nouveau</div>' +
       '<div class="tab" id="tab-stats" onclick="switchTab(\'stats\')">Dashboard</div>'
     : '<div class="tab active" id="tab-chantiers" onclick="switchTab(\'chantiers\')">Mes chantiers</div>' +
+      '<div class="tab" id="tab-planning" onclick="switchTab(\'planning\')">Planning</div>' +
       '<div class="tab" id="tab-stats" onclick="switchTab(\'stats\')">Mon compte</div>';
 
   activeTab = 'chantiers';
@@ -1143,6 +1159,7 @@ function render() {
   const c = document.getElementById('content');
   if (currentChantier) renderDetail(c);
   else if (activeTab === 'chantiers') renderList(c);
+  else if (activeTab === 'planning') renderPlanning(c);
   else if (activeTab === 'nouveau') renderNouveau(c);
   else if (activeTab === 'stats') renderStats(c);
   // Les écrans sans grille photo n'ont aucune cellule à remplir : no-op.
@@ -1208,7 +1225,7 @@ function setFilter(f) { filterStatut = f; render(); }
 // Délégation d'événement plutôt qu'un onclick="openChantier('...')" par
 // carte : l'id n'a plus à survivre à une interpolation dans un attribut.
 document.getElementById('content').addEventListener('click', e => {
-  const card = e.target.closest('.card[data-id]');
+  const card = e.target.closest('.card[data-id], .pl-item[data-id]');
   if (card) openChantier(card.getAttribute('data-id'));
 });
 
@@ -1256,11 +1273,21 @@ function renderDetail(c) {
           : '')) +
     (estPatron()
       ? '<div class="field-group" style="margin-top:12px">' +
+        '<div class="field-label">📅 Date prévue</div>' +
+        '<input class="field-input" type="date" id="date-fiche" value="' + esc(ch.date || '') + '" ' +
+          'onchange="changerDate(this.value)">' +
+        '<div class="draft-note" id="date-note"></div></div>' +
+        '<div class="field-group">' +
         '<div class="field-label">🧰 Matériel à emporter</div>' +
         casesMateriel(ch.materiel, 'basculerMateriel') +
         '<div class="draft-note" id="materiel-note"></div></div>'
       // Côté terrain : lisible d'un coup d'œil avant de charger le camion.
-      : ((ch.materiel || []).length
+      : (ch.date
+          ? '<div class="detail-row"><div class="detail-icon" style="background:var(--blue-light)">📅</div>' +
+            '<div><div class="detail-main">' + esc(dateLisible(ch.date)) + '</div>' +
+            '<div class="detail-sub">Date prévue</div></div></div>'
+          : '') +
+        ((ch.materiel || []).length
           ? '<div class="detail-row"><div class="detail-icon" style="background:var(--amber-light)">🧰</div>' +
             '<div><div class="detail-main">' + esc((ch.materiel || []).join(', ')) + '</div>' +
             '<div class="detail-sub">Matériel à emporter</div></div></div>'
@@ -1307,6 +1334,28 @@ function renderDetail(c) {
     (estPatron()
       ? '<button class="btn btn-gray" style="color:var(--rouge);border-color:var(--rouge-light)" onclick="supprimerChantier()">🗑 Supprimer cette fiche</button>'
       : '');
+}
+
+// La date prévue ne pouvait être fixée qu'à la création : un chantier
+// reporté pour cause de pluie restait bloqué à son ancienne date, et
+// apparaissait indéfiniment en retard dans le planning.
+function changerDate(val) {
+  if (!currentChantier) return;
+  currentChantier.date = val;
+  saveChantiers();
+  syncChantier(currentChantier);
+  const n = document.getElementById('date-note');
+  if (n) {
+    n.textContent = val ? '✓ Reporté au ' + dateLisible(val) : '✓ Date retirée';
+    setTimeout(() => { if (n) n.textContent = ''; }, 2000);
+  }
+}
+
+function dateLisible(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+  if (!m) return iso || '';
+  const d = new Date(+m[1], +m[2] - 1, +m[3]);
+  return JOURS[(d.getDay() + 6) % 7] + ' ' + d.getDate() + ' ' + MOIS[d.getMonth()];
 }
 
 function quitterFiche() {
@@ -1795,6 +1844,126 @@ function creerChantier() {
   assignesNouveau = [];
   materielNouveau = [];
   apresClic(() => switchTab('chantiers'));
+}
+
+// ============================================================
+// PLANNING
+// ============================================================
+//
+// Volontairement une liste par jour, pas une grille de calendrier : sur
+// un téléphone de chantier, un mois en sept colonnes est illisible, et
+// c'est ce qui alourdit ce genre d'écran. Tout se calcule à partir des
+// fiches déjà en mémoire, sans requête ni bibliothèque.
+
+let semaineOffset = 0;
+
+const JOURS = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi', 'samedi', 'dimanche'];
+const MOIS  = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet',
+               'août', 'septembre', 'octobre', 'novembre', 'décembre'];
+
+function isoDe(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') +
+         '-' + String(d.getDate()).padStart(2, '0');
+}
+
+// Lundi de la semaine visée. getDay() renvoie 0 pour dimanche, d'où le
+// décalage : ici la semaine commence le lundi.
+function lundiDe(offset) {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7) + offset * 7);
+  return d;
+}
+
+function changerSemaine(n) { semaineOffset += n; render(); }
+function semaineCourante() { semaineOffset = 0; render(); }
+
+function ligneChantier(ch, aujourdhui) {
+  const fait = ch.statut === 'Terminé';
+  const retard = !fait && ch.date && ch.date < aujourdhui;
+  const gens = estPatron() ? nomsDe(ch.assignes) : '';
+  return '<div class="pl-item' + (fait ? ' fait' : retard ? ' retard' : '') + '" data-id="' + esc(ch.id) + '">' +
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">' +
+      '<div style="min-width:0">' +
+        '<div class="pl-client">' + esc(ch.client) + '</div>' +
+        '<div class="pl-info">📍 ' + esc(ch.adresse) + '</div>' +
+        (gens ? '<div class="pl-info">👷 ' + esc(gens) + '</div>' : '') +
+      '</div>' + badgeHtml(ch.statut) +
+    '</div></div>';
+}
+
+function renderPlanning(c) {
+  const aujourdhui = isoDe(new Date());
+  const lundi = lundiDe(semaineOffset);
+  const dimanche = new Date(lundi); dimanche.setDate(dimanche.getDate() + 6);
+
+  // Un seul parcours des fiches, regroupées par date.
+  const parJour = {};
+  chantiers.forEach(ch => {
+    if (!ch.date) return;
+    (parJour[ch.date] = parJour[ch.date] || []).push(ch);
+  });
+
+  const libelle = lundi.getDate() + ' ' + MOIS[lundi.getMonth()] + ' → ' +
+                  dimanche.getDate() + ' ' + MOIS[dimanche.getMonth()];
+
+  let html =
+    '<div class="nav-semaine">' +
+      '<button onclick="changerSemaine(-1)">‹</button>' +
+      '<div class="libelle">' + (semaineOffset === 0 ? 'Cette semaine' : libelle) + '</div>' +
+      '<button onclick="changerSemaine(1)">›</button>' +
+    '</div>' +
+    (semaineOffset !== 0
+      ? '<button class="btn btn-gray" style="padding:10px;font-size:13px" onclick="semaineCourante()">Revenir à cette semaine</button>'
+      : '');
+
+  // Le retard ne s'affiche que sur la semaine en cours : ailleurs il
+  // n'aurait pas de sens et masquerait la semaine consultée.
+  //
+  // Sont exclus les chantiers dont le jour figure déjà plus bas dans la
+  // semaine affichée : les faire apparaître deux fois donnerait
+  // l'impression qu'il y a plus de travail qu'en réalité.
+  const debutSemaine = isoDe(lundi);
+  if (semaineOffset === 0) {
+    const retard = chantiers
+      .filter(ch => ch.statut !== 'Terminé' && ch.date && ch.date < aujourdhui && ch.date < debutSemaine)
+      .sort((a, b) => a.date < b.date ? -1 : 1);
+    if (retard.length) {
+      html += '<div class="jour" style="border-bottom-color:var(--amber)">' +
+        '<div class="jour-nom" style="color:var(--amber)">⚠ En retard</div>' +
+        '<div class="jour-nb">' + retard.length + '</div></div>' +
+        retard.map(ch => ligneChantier(ch, aujourdhui)).join('');
+    }
+  }
+
+  for (let i = 0; i < 7; i++) {
+    const j = new Date(lundi); j.setDate(j.getDate() + i);
+    const iso = isoDe(j);
+    const liste = (parJour[iso] || []).slice()
+      .sort((a, b) => (a.statut === 'Terminé') - (b.statut === 'Terminé'));
+    const estAujourdhui = iso === aujourdhui;
+
+    html += '<div class="jour' + (estAujourdhui ? ' aujourdhui' : '') + '">' +
+      '<div class="jour-nom">' + JOURS[i] + ' ' + j.getDate() + ' ' + MOIS[j.getMonth()] +
+      (estAujourdhui ? " · aujourd'hui" : '') + '</div>' +
+      '<div class="jour-nb">' + (liste.length || '') + '</div></div>' +
+      (liste.length ? liste.map(ch => ligneChantier(ch, aujourdhui)).join('')
+                    : '<div class="jour-vide">—</div>');
+  }
+
+  // Sans date, une fiche n'apparaît nulle part dans le planning : on la
+  // signale plutôt que de la laisser disparaître.
+  if (semaineOffset === 0) {
+    const sansDate = chantiers.filter(ch => !ch.date && ch.statut !== 'Terminé');
+    if (sansDate.length) {
+      html += '<div class="jour" style="border-bottom-color:#c0392b">' +
+        '<div class="jour-nom" style="color:#c0392b">Sans date prévue</div>' +
+        '<div class="jour-nb">' + sansDate.length + '</div></div>' +
+        sansDate.map(ch => ligneChantier(ch, aujourdhui)).join('');
+    }
+  }
+
+  c.innerHTML = html;
 }
 
 // ============================================================
