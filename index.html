@@ -238,8 +238,18 @@ async function rafraichirSession() {
 }
 
 function seDeconnecter() {
-  if (getQueue().length && !confirm('Des modifications ne sont pas encore envoyées. Se déconnecter quand même ?')) return;
+  if (getQueue().length && !confirm('Des modifications ne sont pas encore envoyées. Elles seront perdues. Se déconnecter quand même ?')) return;
   couperTempsReel();
+  // Le cache local doit partir avec la session. Sinon le suivant à se
+  // connecter sur ce téléphone voit les chantiers du précédent — noms,
+  // adresses, consignes — tant qu'il n'a pas de réseau. Tout le
+  // cloisonnement repose sur le filtrage serveur ; ce cache le
+  // contournerait localement.
+  localStorage.removeItem('jardinator_chantiers');
+  localStorage.removeItem('jardinator_queue');
+  localStorage.removeItem('jardinator_rejets');
+  localStorage.removeItem(DRAFT_KEY);
+  try { indexedDB.deleteDatabase('jardinator'); } catch (e) {}
   setSession(null);
   location.reload();
 }
@@ -520,6 +530,23 @@ function enqueue(op) {
   flushQueue();
 }
 
+// Tout passage par PATCH exige return=representation : sans lui, une
+// mise à jour qu'aucune ligne n'autorise renvoie 204 comme si tout
+// allait bien, et la modification est perdue en silence.
+async function patchChantier(id, corps) {
+  const lignes = await sbJson(REST + '?id=eq.' + encodeURIComponent(id), {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Prefer: 'return=representation' },
+    body: JSON.stringify(corps)
+  });
+  if (!lignes || !lignes.length) {
+    const e = new Error('aucune ligne modifiée');
+    e.statut = 403;   // chantier supprimé, ou retiré à cet utilisateur
+    throw e;
+  }
+  return lignes[0];
+}
+
 async function executerOp(op) {
   if (op.type === 'create') {
     // merge-duplicates : rejouer la création ne produit pas de doublon.
@@ -531,26 +558,29 @@ async function executerOp(op) {
     return true;
   }
   if (op.type === 'save') {
-    // return=representation est indispensable : sans lui, une mise à jour
-    // qu'aucune ligne n'autorise renvoie 204 comme si tout allait bien.
-    // La modification serait perdue en silence.
-    const lignes = await sbJson(REST + '?id=eq.' + encodeURIComponent(op.id), {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', Prefer: 'return=representation' },
-      body: JSON.stringify(op.payload)
-    });
-    if (!lignes || !lignes.length) {
-      const e = new Error('aucune ligne modifiée');
-      e.statut = 403;   // chantier retiré, supprimé, ou hors de portée
-      throw e;
-    }
+    await patchChantier(op.id, op.payload);
     return true;
   }
   if (op.type === 'delete') {
-    await sbJson(REST + '?id=eq.' + encodeURIComponent(op.id), { method: 'DELETE' });
+    // Même piège que le PATCH : un DELETE que RLS bloque renvoie 204.
+    // Sans la représentation, un ouvrier croirait avoir supprimé.
+    const lignes = await sbJson(REST + '?id=eq.' + encodeURIComponent(op.id), {
+      method: 'DELETE', headers: { Prefer: 'return=representation' }
+    });
+    if (!lignes || !lignes.length) {
+      const e = new Error('aucune ligne supprimée'); e.statut = 403; throw e;
+    }
     return true;
   }
   if (op.type === 'deletePhoto') {
+    // Retirer le fichier ne suffisait pas : son entrée restait dans la
+    // colonne photos, et la synchro suivante la réaffichait — case morte
+    // sur les autres téléphones, puisque le fichier n'existait plus.
+    const rows = await sbJson(REST + '?select=photos&id=eq.' + encodeURIComponent(op.id));
+    if (rows && rows[0]) {
+      const reste = (rows[0].photos || []).filter(p => p.path !== op.path);
+      await patchChantier(op.id, { photos: reste });
+    }
     await supprimerFichier(op.path);
     return true;
   }
@@ -593,6 +623,19 @@ function messageRefus(statut) {
   return "Refusé par le serveur (code " + statut + ").";
 }
 
+// Retire de la file l'opération traitée, en la comparant à ce qu'elle
+// était. Si elle a été remplacée entre-temps, on la laisse : elle sera
+// envoyée au tour suivant.
+function retirerOp(op) {
+  const q = getQueue();
+  const i = q.findIndex(x => x.type === op.type && x.id === op.id && (x.cle || '') === (op.cle || ''));
+  if (i < 0) return q;
+  if (JSON.stringify(q[i]) !== JSON.stringify(op)) { relanceDemandee = true; return q; }
+  q.splice(i, 1);
+  setQueue(q);
+  return q;
+}
+
 let flushing = false, relanceDemandee = false;
 async function flushQueue() {
   // Un envoi est déjà en cours : on note qu'il faudra recommencer plutôt
@@ -612,14 +655,17 @@ async function flushQueue() {
       catch (e) { ok = false; statut = e.statut || 0; }
 
       if (ok) {
-        q = getQueue().slice(1);   // relire : une op a pu s'ajouter pendant l'await
-        setQueue(q);
+        // On retire l'opération PAR IDENTITÉ, pas par position. Pendant
+        // l'await, l'utilisateur a pu agir : enqueue() remplace alors
+        // l'entrée de tête, et un slice(1) jetterait cette nouvelle
+        // version sans jamais l'avoir envoyée.
+        q = retirerOp(op);
         continue;
       }
 
       // Session expirée : insister ne sert à rien, l'utilisateur doit se
       // reconnecter. On garde l'opération intacte pour plus tard.
-      if (statut === 401) break;
+      if (statut === 401) { sessionPerdue(); break; }
 
       // Refus définitif : rejouer donnera toujours le même résultat.
       // Sans cette sortie, l'opération bloquerait indéfiniment tout ce
@@ -630,8 +676,7 @@ async function flushQueue() {
                  quand: new Date().toLocaleString('fr-FR') });
         setRejets(r);
         console.warn('Jardinator : opération refusée, mise de côté', op, statut);
-        q = getQueue().slice(1);
-        setQueue(q);
+        q = retirerOp(op);
         continue;
       }
 
@@ -654,11 +699,7 @@ async function envoyerFichier(op, dataUrl) {
   if (op.type === 'devis') {
     const nom = (op.nom || 'devis.pdf').replace(/[^\w.\-]/g, '_');
     const chemin = await televerser(cheminFichier(op.id, 'devis-' + nom), dataUrl);
-    await sbJson(REST + '?id=eq.' + encodeURIComponent(op.id), {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ devis_path: chemin, devis: op.nom || 'Devis' })
-    });
+    await patchChantier(op.id, { devis_path: chemin, devis: op.nom || 'Devis' });
     rattacher(op, { devisPath: chemin });
     return true;
   }
@@ -698,7 +739,25 @@ function rattacher(op, res) {
   }
 }
 
+// Jeton irrécupérable (mot de passe changé, projet en pause, session
+// révoquée). Sans ce signal, l'app restait indéfiniment sur « envoi en
+// cours » sans que personne ne sache qu'il fallait se reconnecter.
+let alerteSession = false;
+function sessionPerdue() {
+  if (alerteSession) return;
+  alerteSession = true;
+  const el = document.getElementById('queue-banner');
+  if (el) {
+    el.style.display = 'block';
+    el.style.background = 'var(--rouge-light)';
+    el.style.color = 'var(--rouge-dark)';
+    el.textContent = '⚠ Session expirée — reconnectez-vous pour envoyer vos modifications';
+    el.onclick = () => { couperTempsReel(); setSession(null); location.reload(); };
+  }
+}
+
 function updateQueueBanner() {
+  if (alerteSession) return;   // message plus important déjà affiché
   const el = document.getElementById('queue-banner');
   if (!el) return;
   const n = getQueue().length;
@@ -763,7 +822,14 @@ async function loadFromSheets(silent) {
     signalerNouveaux(avantIds);
     updateRefreshIndicator(true);
   } catch (e) {
+    // loadLocal() reconstruit des objets neufs : sans ce raccrochage,
+    // currentChantier pointerait sur un objet absent du tableau, et tout
+    // ce qui serait tapé ensuite ne serait jamais enregistré.
     chantiers = loadLocal();
+    if (currentChantier) {
+      const i = chantiers.findIndex(c => c.id === currentChantier.id);
+      if (i >= 0) chantiers[i] = currentChantier;
+    }
     updateRefreshIndicator(false);
   }
   if (!isEditing()) render();
@@ -1078,6 +1144,7 @@ function openChantier(id) {
   const ch = chantiers.find(c => c.id === id);
   if (!ch) { alert('Cette fiche n\'existe plus.'); currentChantier = null; render(); return; }
   currentChantier = ch;
+  notesInitiales = ch.notes || '';
   render();
 }
 
@@ -1148,10 +1215,22 @@ function renderDetail(c) {
         '</div>' +
         '<div class="divider"></div>' +
         '<button class="btn btn-red" onclick="terminer()" id="btn-terminer">✅ Valider et terminer le chantier</button>') +
-    '<button class="btn btn-gray" style="color:var(--rouge);border-color:var(--rouge-light)" onclick="supprimerChantier()">🗑 Supprimer cette fiche</button>';
+    // Réservé au patron : la base refuse la suppression aux ouvriers, et
+    // proposer le geste leur ferait croire à un succès.
+    (estPatron()
+      ? '<button class="btn btn-gray" style="color:var(--rouge);border-color:var(--rouge-light)" onclick="supprimerChantier()">🗑 Supprimer cette fiche</button>'
+      : '');
 }
 
-function quitterFiche() { saveNotesDraft(); currentChantier = null; render(); }
+function quitterFiche() {
+  saveNotesDraft();
+  // Les notes ne partaient nulle part tant que le chantier n'était pas
+  // clôturé : dès la fiche refermée, la synchro suivante les remplaçait
+  // par la version du serveur. On les envoie en quittant.
+  if (currentChantier && currentChantier.notes !== notesInitiales) syncChantier(currentChantier);
+  currentChantier = null;
+  render();
+}
 
 // Le patron coche ou décoche un ouvrier. Enregistré localement puis
 // envoyé via la file : pas d'attente réseau, et ça marche depuis un
@@ -1183,7 +1262,7 @@ function basculerAssignationNouveau(id, actif) {
 // Sauvegarde à la frappe. Sans ça, tout ce qui est tapé ne vit que dans
 // le DOM : mise en veille du téléphone, appel entrant ou changement
 // d'app suffisent à faire recharger la PWA et à tout perdre.
-let notesTimer = null;
+let notesTimer = null, notesInitiales = '';
 function saveNotesDraft() {
   if (!currentChantier) return;
   const el = document.getElementById('notes-field');
@@ -1243,19 +1322,26 @@ function grillePhotos(photos) {
 
 // Les vignettes arrivent de façon asynchrone (cache local ou proxy) :
 // la grille s'affiche tout de suite et se remplit ensuite.
+// Chaque rendu obtient son propre numéro. Un téléchargement lancé pour
+// une fiche et revenu après un changement d'écran doit être abandonné :
+// sinon les vignettes du chantier précédent se posent dans les cases du
+// suivant — des photos de propriété privée attribuées au mauvais client.
+let rendPhotos = 0;
 async function remplirPhotos() {
+  const monTour = ++rendPhotos;
   const photos = photosCourantes();
   for (let i = 0; i < photos.length; i++) {
-    const cell = document.querySelector('.photo-cell[data-i="' + i + '"]');
-    if (!cell) return;                       // l'écran a changé entre-temps
+    if (monTour !== rendPhotos) return;
     const src = await photoSrc(photos[i]);
-    const encore = document.querySelector('.photo-cell[data-i="' + i + '"]');
-    if (!encore) return;
-    const flag = encore.querySelector('.photo-flag');
-    encore.innerHTML = src
+    if (monTour !== rendPhotos) return;
+    // On vise la case par la clé de la photo, pas par sa position.
+    const cell = document.querySelector('.photo-cell[data-i="' + i + '"]');
+    if (!cell || cell.getAttribute('data-cle') !== (photos[i].cle || '')) return;
+    const flag = cell.querySelector('.photo-flag');
+    cell.innerHTML = src
       ? '<img src="' + src + '" alt="Photo chantier">'
       : '<div class="photo-load">Hors ligne</div>';
-    if (flag) encore.appendChild(flag);
+    if (flag) cell.appendChild(flag);
   }
 }
 
@@ -1423,7 +1509,11 @@ function showModal() {
     '<button class="btn btn-black" onclick="closeModal();currentChantier=null;render()">Retour à la liste</button>' +
   '</div>';
 
-  overlay.addEventListener('click', e => { if (e.target === overlay) closeModal(); });
+  // Fermer en tapant à côté doit ramener à la liste comme le bouton :
+  // sinon la fiche réapparaît « À faire », et l'ouvrier revalide.
+  overlay.addEventListener('click', e => {
+    if (e.target === overlay) { closeModal(); currentChantier = null; render(); }
+  });
   document.body.appendChild(overlay);
   suivreSync();
 }
