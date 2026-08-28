@@ -130,6 +130,20 @@ create policy "chantiers suppression" on public.chantiers
   for delete to authenticated using (public.est_patron());
 
 -- ----------------------------------------------------------------
+-- Synchronisation instantanée
+-- ----------------------------------------------------------------
+-- Sans cette ligne, l'app ne reçoit rien en direct et retombe sur son
+-- sondage toutes les 30 secondes. Les règles RLS ci-dessus s'appliquent
+-- aussi aux messages temps réel : un ouvrier n'est notifié que des
+-- chantiers qui le concernent.
+do $$
+begin
+  alter publication supabase_realtime add table public.chantiers;
+exception
+  when duplicate_object then null;   -- déjà publiée, on ne fait rien
+end $$;
+
+-- ----------------------------------------------------------------
 -- L'équipe, pour le menu déroulant « Assigné à »
 -- ----------------------------------------------------------------
 -- La table auth.users n'est pas interrogeable depuis l'app. Cette vue

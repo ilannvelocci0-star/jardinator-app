@@ -243,6 +243,7 @@ async function rafraichirSession() {
 
 function seDeconnecter() {
   if (getQueue().length && !confirm('Des modifications ne sont pas encore envoyées. Se déconnecter quand même ?')) return;
+  couperTempsReel();
   setSession(null);
   location.reload();
 }
@@ -648,10 +649,12 @@ function isEditing() {
 async function loadFromSheets(silent) {
   if (!CONFIGURED || !session) { chantiers = loadLocal(); render(); return; }
   if (!silent) showLoader();
+  const avantIds = new Set(chantiers.map(c => c.id));
   try {
     const rows = await sbJson(REST + '?select=*&order=maj_le.desc');
     chantiers = mergeRemote((rows || []).map(versApp));
     saveChantiers();
+    signalerNouveaux(avantIds);
     updateRefreshIndicator(true);
   } catch (e) {
     chantiers = loadLocal();
@@ -697,8 +700,109 @@ function updateRefreshIndicator(ok) {
 }
 
 // Rafraîchissement auto — mais jamais pendant une saisie.
+// Conservé même avec le temps réel : c'est le filet si le WebSocket
+// tombe, ou si le réseau du camion coupe la connexion permanente.
 setInterval(() => { if (!isEditing()) loadFromSheets(true); }, 30000);
 setInterval(flushQueue, 15000);
+
+// ============================================================
+// TEMPS RÉEL
+// ============================================================
+//
+// WebSocket Supabase : Lucas assigne un chantier, il apparaît chez
+// l'ouvrier dans la seconde au lieu d'attendre le prochain sondage.
+//
+// Volontairement écrit pour ne jamais casser l'app : la moindre erreur
+// se solde par un retour au sondage 30 s. Le temps réel accélère, il ne
+// remplace rien.
+
+let ws = null, wsBattement = null, wsRelance = null, wsRef = 0;
+
+function tempsReel() {
+  if (!CONFIGURED || !session || ws) return;
+  try {
+    ws = new WebSocket(SUPABASE_URL.replace(/^http/, 'ws') + '/realtime/v1/websocket?apikey=' +
+                       encodeURIComponent(SUPABASE_KEY) + '&vsn=1.0.0');
+  } catch (e) { return; }
+
+  ws.onopen = () => {
+    // Le jeton de session est transmis : le serveur applique les mêmes
+    // règles qu'en lecture normale, un ouvrier n'est averti que de ses
+    // propres chantiers.
+    envoyerWs('realtime:chantiers', 'phx_join', {
+      config: {
+        postgres_changes: [{ event: '*', schema: 'public', table: 'chantiers' }],
+        private: false
+      },
+      access_token: session.access_token
+    });
+    clearInterval(wsBattement);
+    wsBattement = setInterval(() => envoyerWs('phoenix', 'heartbeat', {}), 25000);
+  };
+
+  ws.onmessage = (msg) => {
+    let d;
+    try { d = JSON.parse(msg.data); } catch (e) { return; }
+    if (d.event === 'postgres_changes' && !isEditing()) loadFromSheets(true);
+  };
+
+  ws.onclose = ws.onerror = () => {
+    clearInterval(wsBattement);
+    ws = null;
+    // Reconnexion espacée : inutile de marteler un réseau absent, le
+    // sondage assure déjà la continuité.
+    clearTimeout(wsRelance);
+    if (session) wsRelance = setTimeout(tempsReel, 15000);
+  };
+}
+
+function envoyerWs(topic, event, payload) {
+  if (!ws || ws.readyState !== 1) return;
+  try { ws.send(JSON.stringify({ topic: topic, event: event, payload: payload, ref: String(++wsRef) })); }
+  catch (e) {}
+}
+
+// ============================================================
+// ALERTES
+// ============================================================
+//
+// Alerte système affichée quand l'app est OUVERTE. Elle ne réveille pas
+// un téléphone verrouillé : cela demanderait un service d'envoi de
+// notifications et un serveur, hors de portée ici.
+
+function alertesActives() {
+  return ('Notification' in window) && Notification.permission === 'granted';
+}
+
+function demanderAlertes() {
+  if (!('Notification' in window)) { alert("Ce navigateur ne gère pas les alertes."); return; }
+  Notification.requestPermission().then(() => render());
+}
+
+function notifier(titre, corps) {
+  if (!alertesActives()) return;
+  try { new Notification(titre, { body: corps, icon: 'icon-192.png', tag: 'jardinator' }); }
+  catch (e) {}
+}
+
+// Compare l'avant et l'après d'une synchro pour repérer ce qui vient
+// d'arriver. Silencieux au tout premier chargement, sinon l'ouvrier
+// recevrait une alerte par chantier existant.
+function signalerNouveaux(avantIds) {
+  if (!avantIds.size || estPatron()) return;
+  const nouveaux = chantiers.filter(c => !avantIds.has(c.id) && c.statut !== 'Terminé');
+  if (!nouveaux.length) return;
+  notifier(
+    nouveaux.length === 1 ? 'Nouveau chantier : ' + nouveaux[0].client
+                          : nouveaux.length + ' nouveaux chantiers',
+    nouveaux.map(c => c.adresse).join(' · ')
+  );
+}
+
+function couperTempsReel() {
+  clearInterval(wsBattement); clearTimeout(wsRelance);
+  if (ws) { try { ws.close(); } catch (e) {} ws = null; }
+}
 
 function showLoader() {
   document.getElementById('content').innerHTML =
@@ -1464,6 +1568,14 @@ function renderStats(c) {
         ? '<div class="alert-warning">⏳ ' + enAttente + ' modification(s) en attente d\'envoi.</div>'
         : '<div class="alert-success"><span class="sync-indicator"></span>Connecté — synchronisation active</div>') +
     '<div class="divider"></div>' +
+    '<div class="section-title">Alertes</div>' +
+    (!('Notification' in window)
+      ? '<div class="alert-warning">Ce navigateur ne gère pas les alertes.</div>'
+      : alertesActives()
+        ? '<div class="alert-success">🔔 Alertes activées — vous serez prévenu des nouveaux chantiers quand l\'app est ouverte.</div>'
+        : '<div style="font-size:13px;color:#666;margin-bottom:10px">Recevoir une alerte à l\'arrivée d\'un nouveau chantier.</div>' +
+          '<button class="btn btn-gray" onclick="demanderAlertes()">🔔 Activer les alertes</button>') +
+    '<div class="divider"></div>' +
     '<div class="section-title">Compte</div>' +
     '<div class="file-chip"><span style="font-size:20px">👤</span>' +
       '<span class="file-chip-name">' + esc((session && session.user && session.user.email) || '—') + '</span></div>' +
@@ -1493,6 +1605,7 @@ function demarrer() {
   render();
   updateQueueBanner();
   flushQueue();
+  tempsReel();
   chargerEquipe().then(() => loadFromSheets(true));
 }
 
@@ -1528,7 +1641,13 @@ if (session && session.access_token) demarrer();
 // d'app), on force la persistance de ce qui est à l'écran.
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') { saveNotesDraft(); saveChantiers(); }
-  else flushQueue();
+  else {
+    flushQueue();
+    // Le WebSocket est souvent coupé pendant la mise en veille :
+    // on le relance et on resynchronise à la reprise.
+    tempsReel();
+    if (!isEditing()) loadFromSheets(true);
+  }
 });
 
 if ('serviceWorker' in navigator) {
