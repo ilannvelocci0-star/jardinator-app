@@ -131,6 +131,31 @@ des chantiers. À archiver.
 Le fichier `apps-script-jardinator.gs` du dépôt est le vestige de cette
 époque, tu peux le supprimer.
 
+## Deux pièges iOS, payés cher
+
+Ils ne se voient ni en local ni sur un ordinateur, seulement sur un
+iPhone, et de façon intermittente.
+
+**Ne reconstruis pas l'écran depuis le gestionnaire du clic.** Détruire
+l'élément qu'on vient de toucher empêche Safari de repeindre : l'écran
+reste blanc jusqu'au contact suivant, alors que l'état est correct.
+Passe par `apresClic()`, qui relâche le focus, sort du gestionnaire et
+force un recalcul de couche.
+
+Et surtout, `apresClic()` n'utilise **pas** `requestAnimationFrame` :
+il ne se déclenche jamais quand la page est masquée. Un écran qui se
+verrouille au moment du clic laisserait l'action en suspens — le
+chantier créé mais le formulaire toujours affiché, prêt à être validé
+une seconde fois. C'est une correction qui a d'abord été faite avec
+rAF, puis annulée pour cette raison.
+
+**Un `<input type=file>` doit être dans le document.** Détaché, Safari
+peut le recycler avant que l'événement n'arrive, et la photo est perdue
+sans message — ouvrir l'appareil photo mettant justement le navigateur
+sous pression mémoire. `choisirFichiers()` l'insère puis le retire, et
+traite l'annulation : sans ça l'attente ne se terminait jamais et le
+bouton photo restait inerte jusqu'au rechargement.
+
 ## Déployer
 
 ```
