@@ -269,7 +269,14 @@ async function sb(chemin, opts, rejoue) {
 
 async function sbJson(chemin, opts) {
   const res = await sb(chemin, opts);
-  if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()).slice(0, 200));
+  if (!res.ok) {
+    // Le code HTTP est attaché à l'erreur : c'est lui qui permet à la
+    // file de distinguer « le réseau est tombé, je retenterai » de
+    // « le serveur a refusé, insister ne servira à rien ».
+    const err = new Error('HTTP ' + res.status + ' ' + (await res.text()).slice(0, 200));
+    err.statut = res.status;
+    throw err;
+  }
   const t = await res.text();
   return t ? JSON.parse(t) : null;
 }
@@ -289,7 +296,7 @@ async function televerser(chemin, dataUrl) {
     headers: { 'Content-Type': blob.type || 'application/octet-stream', 'x-upsert': 'true' },
     body: blob
   });
-  if (!res.ok) throw new Error('upload ' + res.status);
+  if (!res.ok) { const e = new Error('upload ' + res.status); e.statut = res.status; throw e; }
   return chemin;
 }
 
@@ -505,6 +512,79 @@ function enqueue(op) {
   flushQueue();
 }
 
+async function executerOp(op) {
+  if (op.type === 'create') {
+    // merge-duplicates : rejouer la création ne produit pas de doublon.
+    await sbJson(REST, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' },
+      body: JSON.stringify([op.payload])
+    });
+    return true;
+  }
+  if (op.type === 'save') {
+    // return=representation est indispensable : sans lui, une mise à jour
+    // qu'aucune ligne n'autorise renvoie 204 comme si tout allait bien.
+    // La modification serait perdue en silence.
+    const lignes = await sbJson(REST + '?id=eq.' + encodeURIComponent(op.id), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Prefer: 'return=representation' },
+      body: JSON.stringify(op.payload)
+    });
+    if (!lignes || !lignes.length) {
+      const e = new Error('aucune ligne modifiée');
+      e.statut = 403;   // chantier retiré, supprimé, ou hors de portée
+      throw e;
+    }
+    return true;
+  }
+  if (op.type === 'delete') {
+    await sbJson(REST + '?id=eq.' + encodeURIComponent(op.id), { method: 'DELETE' });
+    return true;
+  }
+  if (op.type === 'deletePhoto') {
+    await supprimerFichier(op.path);
+    return true;
+  }
+
+  const dataUrl = await fichierGet(op.cle);
+  if (!dataUrl) {
+    // Blob introuvable (cache vidé, écriture locale échouée). On abandonne
+    // l'opération pour ne pas bloquer la file — mais sans le dire, un
+    // fichier disparaîtrait sans laisser de trace.
+    console.warn('Jardinator : fichier local introuvable, envoi abandonné', op.type, op.cle);
+    return true;
+  }
+  return envoyerFichier(op, dataUrl);
+}
+
+// Opérations définitivement refusées par le serveur. Elles sont sorties
+// de la file pour ne pas bloquer le reste, mais conservées et signalées :
+// une modification ne doit jamais disparaître en silence.
+function getRejets() {
+  try { return JSON.parse(localStorage.getItem('jardinator_rejets') || '[]'); }
+  catch (e) { return []; }
+}
+function setRejets(r) { localStorage.setItem('jardinator_rejets', JSON.stringify(r.slice(-20))); }
+
+function decrireOp(op) {
+  const ch = chantiers.find(c => c.id === op.id);
+  const qui = ch ? ch.client : op.id;
+  return ({ save: 'Modification de ' + qui, create: 'Création de ' + qui,
+            delete: 'Suppression de ' + qui,
+            photo: 'Photo de ' + qui, devis: 'Devis de ' + qui,
+            signature: 'Signature de ' + qui, deletePhoto: 'Photo supprimée de ' + qui })[op.type]
+         || (op.type + ' — ' + qui);
+}
+
+function messageRefus(statut) {
+  if (statut === 403) return "Ce chantier ne vous est plus assigné.";
+  if (statut === 404) return "Ce chantier n'existe plus.";
+  if (statut === 409) return "Conflit avec une modification faite ailleurs.";
+  if (statut === 413) return "Fichier trop volumineux.";
+  return "Refusé par le serveur (code " + statut + ").";
+}
+
 let flushing = false;
 async function flushQueue() {
   if (flushing || !CONFIGURED || !session || !navigator.onLine) return;
@@ -513,39 +593,39 @@ async function flushQueue() {
     let q = getQueue();
     while (q.length) {
       const op = q[0];
-      let ok = false;
-      try {
-        if (op.type === 'save') {
-          // resolution=merge-duplicates : upsert sur la clé primaire, donc
-          // la même opération rejouée deux fois ne crée pas de doublon.
-          await sbJson(REST, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' },
-            body: JSON.stringify([op.payload])
-          });
-          ok = true;
-        } else if (op.type === 'delete') {
-          await sbJson(REST + '?id=eq.' + encodeURIComponent(op.id), { method: 'DELETE' });
-          ok = true;
-        } else if (op.type === 'deletePhoto') {
-          await supprimerFichier(op.path);
-          ok = true;
-        } else {
-          const dataUrl = await fichierGet(op.cle);
-          if (!dataUrl) {
-            // Blob introuvable (cache vidé, écriture locale échouée).
-            // On abandonne l'opération pour ne pas bloquer la file — mais
-            // sans le dire, un fichier disparaîtrait sans laisser de trace.
-            console.warn('Jardinator : fichier local introuvable, envoi abandonné', op.type, op.cle);
-            ok = true;
-          } else {
-            ok = await envoyerFichier(op, dataUrl);
-          }
-        }
-      } catch (e) { ok = false; }
-      if (!ok) break;              // réseau ou serveur KO : on retentera
-      q = getQueue().slice(1);     // relire : une op a pu s'ajouter pendant l'await
-      setQueue(q);
+      let ok = false, statut = 0;
+
+      try { ok = await executerOp(op); }
+      catch (e) { ok = false; statut = e.statut || 0; }
+
+      if (ok) {
+        q = getQueue().slice(1);   // relire : une op a pu s'ajouter pendant l'await
+        setQueue(q);
+        continue;
+      }
+
+      // Session expirée : insister ne sert à rien, l'utilisateur doit se
+      // reconnecter. On garde l'opération intacte pour plus tard.
+      if (statut === 401) break;
+
+      // Refus définitif : rejouer donnera toujours le même résultat.
+      // Sans cette sortie, l'opération bloquerait indéfiniment tout ce
+      // qui la suit — photos et clôtures des autres chantiers compris.
+      if (statut >= 400 && statut < 500) {
+        const r = getRejets();
+        r.push({ quoi: decrireOp(op), pourquoi: messageRefus(statut),
+                 quand: new Date().toLocaleString('fr-FR') });
+        setRejets(r);
+        console.warn('Jardinator : opération refusée, mise de côté', op, statut);
+        q = getQueue().slice(1);
+        setQueue(q);
+        continue;
+      }
+
+      // Panne réseau ou serveur indisponible : on retentera plus tard,
+      // sans toucher à l'ordre — une photo ne doit pas partir avant la
+      // création du chantier auquel elle se rattache.
+      break;
     }
   } finally {
     flushing = false;
@@ -621,11 +701,33 @@ function updateQueueBanner() {
   const el = document.getElementById('queue-banner');
   if (!el) return;
   const n = getQueue().length;
+  const rejets = getRejets().length;
+
+  // Un refus prime sur l'attente : c'est le seul cas qui demande une
+  // action de la part de quelqu'un.
+  if (rejets) {
+    el.style.display = 'block';
+    el.style.background = 'var(--rouge-light)';
+    el.style.color = 'var(--rouge-dark)';
+    el.textContent = '⚠ ' + rejets + ' modification(s) refusée(s) — voir ' +
+                     (estPatron() ? 'Dashboard' : 'Mon compte');
+    return;
+  }
+
+  el.style.background = 'var(--amber-light)';
+  el.style.color = 'var(--amber)';
   if (!n) { el.style.display = 'none'; return; }
   el.style.display = 'block';
   el.textContent = navigator.onLine
     ? '⏳ ' + n + ' modification(s) en cours d\'envoi…'
     : '📴 Hors ligne — ' + n + ' modification(s) seront envoyées au retour du réseau';
+}
+
+function viderRejets() {
+  if (!confirm('Effacer la liste des modifications refusées ?')) return;
+  localStorage.removeItem('jardinator_rejets');
+  updateQueueBanner();
+  render();
 }
 
 window.addEventListener('online', () => { updateQueueBanner(); flushQueue(); });
@@ -688,8 +790,17 @@ function mergeRemote(remote) {
   return merged;
 }
 
+// Deux opérations distinctes, et ce n'est pas cosmétique : créer exige
+// le droit INSERT, réservé au patron. Un upsert (POST) demande ce droit
+// même quand il ne fait que mettre à jour — un ouvrier ne pourrait donc
+// rien enregistrer. Les modifications passent en PATCH, que les ouvriers
+// ont sur leurs chantiers.
 function syncChantier(ch) {
   enqueue({ type: 'save', id: ch.id, payload: versDb(ch) });
+}
+
+function creerDistant(ch) {
+  enqueue({ type: 'create', id: ch.id, payload: versDb(ch) });
 }
 
 function updateRefreshIndicator(ok) {
@@ -1526,7 +1637,7 @@ function creerChantier() {
 
   // La ligne doit exister côté serveur avant que photos et devis puissent
   // s'y rattacher : la file est FIFO, donc « save » d'abord.
-  syncChantier(nouveau);
+  creerDistant(nouveau);
   if (devisNouveau) enqueue({ type: 'devis', id: nouveau.id, cle: devisNouveau.cle, nom: devisNouveau.nom });
   photosNouveau.forEach(p => enqueue({ type: 'photo', id: nouveau.id, cle: p.cle, nom: p.nom }));
 
@@ -1567,6 +1678,21 @@ function renderStats(c) {
       : enAttente
         ? '<div class="alert-warning">⏳ ' + enAttente + ' modification(s) en attente d\'envoi.</div>'
         : '<div class="alert-success"><span class="sync-indicator"></span>Connecté — synchronisation active</div>') +
+    (getRejets().length
+      ? '<div class="divider"></div>' +
+        '<div class="section-title">Modifications refusées</div>' +
+        '<div class="alert-warning">Ces modifications n\'ont pas pu être enregistrées sur le serveur. ' +
+        'Elles restent visibles sur cet appareil mais ne sont pas partagées.</div>' +
+        getRejets().slice().reverse().map(r =>
+          '<div class="file-chip" style="align-items:flex-start">' +
+            '<span style="font-size:18px">⚠</span>' +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="font-size:14px;color:var(--noir)">' + esc(r.quoi) + '</div>' +
+              '<div style="font-size:12px;color:#888;margin-top:2px">' + esc(r.pourquoi) + '</div>' +
+              '<div style="font-size:11px;color:#bbb;margin-top:2px">' + esc(r.quand) + '</div>' +
+            '</div></div>').join('') +
+        '<button class="btn btn-gray" onclick="viderRejets()">Effacer cette liste</button>'
+      : '') +
     '<div class="divider"></div>' +
     '<div class="section-title">Alertes</div>' +
     (!('Notification' in window)
