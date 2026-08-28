@@ -214,6 +214,18 @@ La date prévue se modifie depuis la fiche, côté patron uniquement — un
 chantier reporté pour cause de pluie doit pouvoir changer de jour, sans
 quoi il reste indéfiniment en retard.
 
+Trois échelles, sélecteur en haut : **Semaine**, **Mois**, **Année**.
+Chacune renvoie vers la suivante d'un clic — un jour du mois ouvre sa
+semaine, un mois de l'année ouvre sa grille.
+
+L'année n'est volontairement pas douze mini-calendriers : illisibles sur
+un téléphone, et sans intérêt. Ce sont douze barres de charge réparties
+par statut, calées sur le mois le plus chargé. C'est ce qui montre la
+saison — creux l'hiver, pic au printemps.
+
+`offsetSemaineDe()` arrondit la division par sept jours : sans ça, le
+changement d'heure décalerait le calcul d'un cran deux fois par an.
+
 ## Entretien annuel
 
 Le Dashboard du patron a une section **Entretien** qui affiche le nombre

@@ -107,6 +107,30 @@ textarea.field-input{min-height:90px;resize:vertical}
 #cr .cr-qr{text-align:center;flex-shrink:0}
 #cr .cr-qr img{width:88px;height:88px;display:block}
 #cr .cr-qr div{font-size:9px;color:#6b665f;margin-top:4px;letter-spacing:.04em}
+.vues{display:flex;gap:6px;margin-bottom:12px}
+.vues button{flex:1;padding:9px 4px;border-radius:9px;border:1px solid #ddd;background:white;font-size:13px;font-weight:600;color:#777;cursor:pointer}
+.vues button.on{background:var(--rouge);border-color:var(--rouge);color:white}
+.mois-entete{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;margin-bottom:4px}
+.mois-entete div{text-align:center;font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.04em}
+.mois-grille{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+.mois-jour{aspect-ratio:1;border:0.5px solid #e0dbd6;border-radius:7px;background:white;padding:3px 2px;display:flex;flex-direction:column;align-items:center;cursor:pointer;overflow:hidden}
+.mois-jour.hors{opacity:.3}
+.mois-jour.auj{border:1.5px solid var(--rouge)}
+.mois-jour.vide{background:#faf8f6;cursor:default}
+.mois-num{font-size:11px;color:#666;line-height:1.2}
+.mois-jour.auj .mois-num{color:var(--rouge);font-weight:700}
+.mois-pts{display:flex;flex-wrap:wrap;gap:2px;justify-content:center;margin-top:2px}
+.mois-pt{width:5px;height:5px;border-radius:50%}
+.mois-plus{font-size:8px;color:#999;line-height:1}
+.an-mois{display:flex;align-items:center;gap:10px;padding:9px 11px;background:white;border:0.5px solid #ddd;border-radius:10px;margin-bottom:6px;cursor:pointer}
+.an-mois.auj{border-color:var(--rouge)}
+.an-nom{width:72px;font-size:13px;font-weight:600;color:var(--noir);text-transform:capitalize;flex-shrink:0}
+.an-barre{flex:1;height:16px;background:#f0ebe6;border-radius:4px;overflow:hidden;display:flex}
+.an-seg{height:100%}
+.an-total{width:26px;text-align:right;font-size:14px;font-weight:700;color:var(--noir);flex-shrink:0}
+.legende{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:#888;margin:10px 0 4px}
+.legende span{display:flex;align-items:center;gap:5px}
+.legende i{width:8px;height:8px;border-radius:50%;display:inline-block}
 .jour{display:flex;align-items:baseline;gap:8px;margin:18px 0 8px;padding-bottom:5px;border-bottom:1px solid #e0dbd6}
 .jour-nom{font-size:14px;font-weight:700;color:var(--noir);text-transform:capitalize}
 .jour-nb{font-size:12px;color:#999;margin-left:auto}
@@ -2083,6 +2107,151 @@ function lundiDe(offset) {
 function changerSemaine(n) { semaineOffset += n; render(); }
 function semaineCourante() { semaineOffset = 0; render(); }
 
+// Trois échelles pour le même planning : la semaine sert d'emploi du
+// temps au quotidien, le mois donne la charge d'un coup d'œil, l'année
+// montre la saison. Chacune renvoie vers la suivante d'un clic.
+let planningVue = 'semaine';
+let moisRef = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+let anneeRef = new Date().getFullYear();
+
+function setVue(v) { planningVue = v; render(); }
+function changerMois(n)  { moisRef = new Date(moisRef.getFullYear(), moisRef.getMonth() + n, 1); render(); }
+function changerAnnee(n) { anneeRef += n; render(); }
+
+// Combien de semaines séparent une date de la semaine en cours. Le
+// Math.round absorbe l'heure gagnée ou perdue au changement d'heure,
+// qui décalerait sinon le calcul d'un cran deux fois par an.
+function offsetSemaineDe(iso) {
+  const [y, m, j] = iso.split('-').map(Number);
+  const d = new Date(y, m - 1, j);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  return Math.round((d - lundiDe(0)) / (7 * 86400000));
+}
+
+function ouvrirJour(iso) {
+  semaineOffset = offsetSemaineDe(iso);
+  planningVue = 'semaine';
+  render();
+}
+
+function ouvrirMois(mois) {
+  moisRef = new Date(anneeRef, mois, 1);
+  planningVue = 'mois';
+  render();
+}
+
+const COULEUR_STATUT = { 'À faire': '#BA7517', 'En cours': '#185FA5', 'Terminé': '#2E7D32' };
+
+// Un seul regroupement par date, réutilisé par les trois vues.
+function chantiersParJour() {
+  const parJour = {};
+  chantiers.forEach(ch => {
+    if (!ch.date) return;
+    (parJour[ch.date] = parJour[ch.date] || []).push(ch);
+  });
+  return parJour;
+}
+
+function selecteurVues() {
+  return '<div class="vues">' +
+    [['semaine', 'Semaine'], ['mois', 'Mois'], ['annee', 'Année']].map(v =>
+      '<button class="' + (planningVue === v[0] ? 'on' : '') + '" onclick="setVue(\'' + v[0] + '\')">' +
+      v[1] + '</button>').join('') + '</div>';
+}
+
+function legendeStatuts() {
+  return '<div class="legende">' +
+    Object.keys(COULEUR_STATUT).map(k =>
+      '<span><i style="background:' + COULEUR_STATUT[k] + '"></i>' + esc(k) + '</span>').join('') + '</div>';
+}
+
+function renderMois(c) {
+  const parJour = chantiersParJour();
+  const aujourdhui = isoDe(new Date());
+  const annee = moisRef.getFullYear(), mois = moisRef.getMonth();
+
+  // On part du lundi qui précède le 1er : la grille commence toujours
+  // un lundi, quitte à déborder sur le mois d'avant.
+  const premier = new Date(annee, mois, 1);
+  const debut = new Date(premier);
+  debut.setDate(debut.getDate() - ((debut.getDay() + 6) % 7));
+
+  let total = 0;
+  let cases = '';
+  for (let i = 0; i < 42; i++) {
+    const j = new Date(debut); j.setDate(j.getDate() + i);
+    const iso = isoDe(j);
+    const dedans = j.getMonth() === mois;
+    const liste = parJour[iso] || [];
+    if (dedans) total += liste.length;
+
+    const pastilles = liste.slice(0, 4).map(ch =>
+      '<i class="mois-pt" style="background:' + (COULEUR_STATUT[ch.statut] || '#999') + '"></i>').join('');
+
+    cases += '<div class="mois-jour' + (dedans ? '' : ' hors') + (iso === aujourdhui ? ' auj' : '') +
+      (liste.length ? '' : ' vide') + '"' +
+      (liste.length ? ' onclick="ouvrirJour(\'' + iso + '\')"' : '') + '>' +
+      '<div class="mois-num">' + j.getDate() + '</div>' +
+      (liste.length ? '<div class="mois-pts">' + pastilles +
+        (liste.length > 4 ? '<div class="mois-plus">+' + (liste.length - 4) + '</div>' : '') + '</div>' : '') +
+      '</div>';
+  }
+
+  c.innerHTML = selecteurVues() +
+    '<div class="nav-semaine">' +
+      '<button onclick="changerMois(-1)">‹</button>' +
+      '<div class="libelle">' + MOIS[mois] + ' ' + annee + '</div>' +
+      '<button onclick="changerMois(1)">›</button>' +
+    '</div>' +
+    '<div class="section-title">' + total + ' chantier(s) ce mois-ci</div>' +
+    '<div class="mois-entete">' + ['L','M','M','J','V','S','D'].map(x => '<div>' + x + '</div>').join('') + '</div>' +
+    '<div class="mois-grille">' + cases + '</div>' +
+    legendeStatuts() +
+    '<div style="font-size:12px;color:#999;margin-top:6px">Touchez un jour pour ouvrir sa semaine.</div>';
+}
+
+function renderAnnee(c) {
+  const parMois = {};
+  chantiers.forEach(ch => {
+    if (!ch.date || ch.date.slice(0, 4) !== String(anneeRef)) return;
+    const m = Number(ch.date.slice(5, 7)) - 1;
+    (parMois[m] = parMois[m] || []).push(ch);
+  });
+
+  // L'échelle des barres se cale sur le mois le plus chargé : sinon un
+  // mois à 3 chantiers et un à 30 se ressemblent.
+  const maxi = Math.max(1, ...Object.values(parMois).map(l => l.length));
+  const moisAuj = new Date().getFullYear() === anneeRef ? new Date().getMonth() : -1;
+
+  const lignes = MOIS.map((nom, m) => {
+    const liste = parMois[m] || [];
+    const part = (st) => liste.filter(ch => ch.statut === st).length;
+    const largeur = liste.length / maxi * 100;
+    const segments = liste.length
+      ? Object.keys(COULEUR_STATUT).map(st =>
+          part(st) ? '<div class="an-seg" style="width:' + (part(st) / liste.length * 100) +
+                     '%;background:' + COULEUR_STATUT[st] + '"></div>' : '').join('')
+      : '';
+    return '<div class="an-mois' + (m === moisAuj ? ' auj' : '') + '" onclick="ouvrirMois(' + m + ')">' +
+      '<div class="an-nom">' + nom + '</div>' +
+      '<div class="an-barre"><div style="width:' + largeur + '%;display:flex;height:100%">' + segments + '</div></div>' +
+      '<div class="an-total">' + (liste.length || '') + '</div></div>';
+  }).join('');
+
+  const total = Object.values(parMois).reduce((t, l) => t + l.length, 0);
+
+  c.innerHTML = selecteurVues() +
+    '<div class="nav-semaine">' +
+      '<button onclick="changerAnnee(-1)">‹</button>' +
+      '<div class="libelle">' + anneeRef + '</div>' +
+      '<button onclick="changerAnnee(1)">›</button>' +
+    '</div>' +
+    '<div class="section-title">' + total + ' chantier(s) sur l\'année</div>' +
+    lignes + legendeStatuts() +
+    '<div style="font-size:12px;color:#999;margin-top:6px">Touchez un mois pour ouvrir sa grille.</div>';
+}
+
 function ligneChantier(ch, aujourdhui) {
   const fait = ch.statut === 'Terminé';
   const retard = !fait && ch.date && ch.date < aujourdhui;
@@ -2098,21 +2267,19 @@ function ligneChantier(ch, aujourdhui) {
 }
 
 function renderPlanning(c) {
+  if (planningVue === 'mois')  return renderMois(c);
+  if (planningVue === 'annee') return renderAnnee(c);
+
   const aujourdhui = isoDe(new Date());
   const lundi = lundiDe(semaineOffset);
   const dimanche = new Date(lundi); dimanche.setDate(dimanche.getDate() + 6);
 
-  // Un seul parcours des fiches, regroupées par date.
-  const parJour = {};
-  chantiers.forEach(ch => {
-    if (!ch.date) return;
-    (parJour[ch.date] = parJour[ch.date] || []).push(ch);
-  });
+  const parJour = chantiersParJour();
 
   const libelle = lundi.getDate() + ' ' + MOIS[lundi.getMonth()] + ' → ' +
                   dimanche.getDate() + ' ' + MOIS[dimanche.getMonth()];
 
-  let html =
+  let html = selecteurVues() +
     '<div class="nav-semaine">' +
       '<button onclick="changerSemaine(-1)">‹</button>' +
       '<div class="libelle">' + (semaineOffset === 0 ? 'Cette semaine' : libelle) + '</div>' +
