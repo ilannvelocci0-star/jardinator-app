@@ -47,7 +47,13 @@ Le modèle de droits tient en deux lignes :
 - **Patron** (`app_metadata.role = 'patron'`) : voit tout, crée, supprime, assigne.
 - **Ouvrier** : ne voit que les chantiers où son `uid` est dans le tableau
   `assignes`. Peut modifier notes, statut et photos de ses chantiers.
-  Ne peut ni créer ni supprimer de fiche.
+  Ne peut ni créer ni supprimer de fiche, ni changer le matériel.
+
+La liste de matériel (`MATERIEL` dans `index.html`) est en dur : onze
+entrées, dans l'ordre de chargement du camion et non alphabétique. Pour
+en ajouter une, il suffit de compléter le tableau — les valeurs sont
+stockées en clair dans la colonne `materiel`, donc renommer une entrée
+existante ne met pas à jour les chantiers déjà enregistrés.
 
 Le rôle est lu dans `app_metadata` et pas `user_metadata` : le second est
 modifiable par l'utilisateur lui-même via l'API, il pourrait se

@@ -32,6 +32,10 @@ create table if not exists public.chantiers (
   -- fait souvent à deux ou trois. Chacun d'eux voit la fiche ; un
   -- chantier sans personne n'est visible que du patron.
   assignes       uuid[] not null default '{}',
+  -- Matériel à charger dans le camion, décidé par le patron. Les noms
+  -- sont stockés en clair : la feuille reste lisible dans l'éditeur de
+  -- table sans avoir à croiser une autre liste.
+  materiel       text[] not null default '{}',
   cree_le        timestamptz not null default now(),
   maj_le         timestamptz not null default now()
 );
@@ -40,6 +44,9 @@ create table if not exists public.chantiers (
 -- base déjà créée sans repartir de zéro.
 alter table public.chantiers
   add column if not exists assignes uuid[] not null default '{}';
+
+alter table public.chantiers
+  add column if not exists materiel text[] not null default '{}';
 
 -- Les règles de sécurité sont recréées plus bas, mais il faut les
 -- retirer DÈS MAINTENANT : celles de la version précédente référencent
