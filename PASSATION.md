@@ -252,6 +252,32 @@ là où elle en était — les fichiers partent avant que la liste ne soit
 vidée en base, de sorte qu'une interruption laisse des références vers
 des fichiers absents plutôt que des fichiers que plus rien ne référence.
 
+## Le conseil qui vaut plus que le reste
+
+Fais relire ton code par quelqu'un d'autre — un collègue, ou un autre
+modèle que celui qui l'a écrit — **avant** de mettre en ligne.
+
+Ce projet a été relu deux fois de façon indépendante. Ces relectures ont
+trouvé **24 défauts** dans du code déjà écrit et testé, dont plusieurs
+pertes de données silencieuses : des notes écrasées sans avertissement,
+une signature de fin de chantier jamais transmise, des photos attribuées
+au mauvais client, un compte-rendu qui ressortait avec les données du
+client précédent.
+
+Aucun n'aurait été trouvé par les tests de celui qui avait écrit le
+code : un test vérifie que la fonction fait ce qu'on attend d'elle, il
+ne voit pas ce à quoi on n'a pas pensé. Le troisième cas ci-dessus vient
+d'ailleurs d'une fonctionnalité ajoutée pour corriger le premier.
+
+Les trois zones où ça se joue à chaque fois, dans ce projet :
+
+1. **Sortir d'un écran autrement que par le chemin prévu** — un onglet,
+   un lien interne, un rechargement de la PWA.
+2. **Un serveur qui répond « oui » sans avoir tout fait** — RLS qui
+   écarte une partie d'un lot, PATCH sans `return=representation`.
+3. **Un état global qui survit à l'écran qui l'a créé** — le `#cr` du
+   compte-rendu en est l'exemple type.
+
 ## Si ça casse
 
 Dans l'ordre : le projet Supabase est-il en pause ? Le dernier build
