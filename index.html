@@ -404,6 +404,7 @@ function versApp(r) {
     assignes: Array.isArray(r.assignes) ? r.assignes : [],
     materiel: Array.isArray(r.materiel) ? r.materiel : [],
     majLe: r.maj_le || '',
+    creeLe: r.cree_le || '',
     photos: Array.isArray(r.photos) ? r.photos : [],
     nbPhotos: Array.isArray(r.photos) ? r.photos.length : 0
   };
@@ -763,6 +764,11 @@ function retirerOp(op) {
   return q;
 }
 
+// Pendant un ménage, la synchro automatique et la file d'attente sont
+// suspendues : elles réaffecteraient « chantiers » au milieu des await,
+// et pourraient recréer côté serveur une fiche qu'on vient d'effacer.
+let menageEnCours = false;
+
 let flushing = false, relanceDemandee = false;
 async function flushQueue() {
   // Un envoi est déjà en cours : on note qu'il faudra recommencer plutôt
@@ -770,7 +776,7 @@ async function flushQueue() {
   // (typiquement une photo, ajoutée juste après la fiche) attendait
   // le prochain passage automatique.
   if (flushing) { relanceDemandee = true; return; }
-  if (!CONFIGURED || !session || !navigator.onLine) return;
+  if (menageEnCours || !CONFIGURED || !session || !navigator.onLine) return;
   flushing = true;
   try {
     let q = getQueue();
@@ -932,6 +938,7 @@ function isEditing() {
 }
 
 async function loadFromSheets(silent) {
+  if (menageEnCours) return;
   if (!CONFIGURED || !session) { chantiers = loadLocal(); render(); return; }
   // Le voile remplace tout le contenu. Par-dessus une fiche ouverte, il
   // effacerait la saisie en cours et l'écran resterait bloqué dessus,
@@ -1197,13 +1204,22 @@ function casesOuvriers(selection, action) {
     selection, action, 'Aucun ouvrier enregistré.');
 }
 
+// Rapproché par libellé et non par indice : retirer ou réordonner une
+// entrée de MATERIEL rendrait sinon invisible — donc impossible à
+// décocher — un matériel toujours imprimé sur le compte-rendu.
 function casesMateriel(selection, action) {
+  const connus = MATERIEL.slice();
+  // Un matériel enregistré qui ne figure plus dans la liste reste
+  // affiché, sinon il disparaîtrait de l'écran sans disparaître des
+  // données.
+  (selection || []).forEach(m => { if (connus.indexOf(m) === -1) connus.push(m); });
   return casesACocher(
-    MATERIEL.map((m, i) => ({ cle: m, val: i, nom: m })),
+    connus.map(m => ({ cle: m, val: JSON.stringify(m), nom: m })),
     selection, action, '');
 }
 
 function switchTab(tab) {
+  sauverFicheCourante();
   activeTab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   const el = document.getElementById('tab-' + tab);
@@ -1238,7 +1254,10 @@ let recherche = '';
 // Accents et casse ignorés : « ecole » doit trouver « École », sinon la
 // recherche est inutilisable au pouce sur un clavier de téléphone.
 function normaliser(t) {
-  return String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  return String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    // Espaces parasites : « Dupont » et « Dupont » sont le même client,
+    // et un espace final se produit très facilement au clavier.
+    .replace(/\s+/g, ' ').trim();
 }
 
 function setRecherche(v) {
@@ -1321,6 +1340,7 @@ document.getElementById('content').addEventListener('click', e => {
 // ============================================================
 
 function openChantier(id) {
+  sauverFicheCourante();   // on peut venir d'une autre fiche, via l'historique
   const ch = chantiers.find(c => c.id === id);
   if (!ch) { alert('Cette fiche n\'existe plus.'); currentChantier = null; render(); return; }
   currentChantier = ch;
@@ -1331,11 +1351,15 @@ function openChantier(id) {
 // Passages précédents chez le même client. Rapproché sur le nom
 // normalisé : les fiches n'ont pas d'identifiant client, chaque chantier
 // est saisi indépendamment.
+// Rapproché sur le nom ET l'adresse. Le nom seul mélangeait les
+// homonymes — Martin, Dubois, Petit sont fréquents — et affichait les
+// notes d'un autre client sur la fiche en cours.
 function historiqueDe(ch) {
-  const cible = normaliser(ch.client);
-  if (!cible) return [];
+  const nom = normaliser(ch.client);
+  const adr = normaliser(ch.adresse);
+  if (!nom) return [];
   return chantiers
-    .filter(c => c.id !== ch.id && normaliser(c.client) === cible)
+    .filter(c => c.id !== ch.id && normaliser(c.client) === nom && normaliser(c.adresse) === adr)
     .sort((a, b) => (b.date || '') < (a.date || '') ? -1 : 1);
 }
 
@@ -1377,7 +1401,7 @@ function renderDetail(c) {
     // pouvoir appeler sans quitter l'application ni chercher le numéro.
     (ch.telephone
       ? '<a class="gps-btn" style="background:var(--green-light);color:var(--green);text-decoration:none" ' +
-        'href="tel:' + esc(String(ch.telephone).replace(/[^0-9+]/g, '')) + '">📞 Appeler ' + esc(ch.client) + ' · ' + esc(ch.telephone) + '</a>'
+        'href="tel:' + esc(numeroAppelable(ch.telephone)) + '">📞 Appeler ' + esc(ch.client) + ' · ' + esc(ch.telephone) + '</a>'
       : '') +
     // Affectation : menu déroulant pour le patron, simple information
     // pour l'ouvrier — qui ne voit de toute façon que ses chantiers.
@@ -1469,11 +1493,22 @@ function renderDetail(c) {
 // La date prévue ne pouvait être fixée qu'à la création : un chantier
 // reporté pour cause de pluie restait bloqué à son ancienne date, et
 // apparaissait indéfiniment en retard dans le planning.
+// « +33 (0)6 88 66 94 04 » : le zéro entre parenthèses ne se compose
+// pas. Le retirer sans quoi le numéro a un chiffre de trop et l'appel
+// échoue.
+function numeroAppelable(tel) {
+  return String(tel || '').replace(/\(0\)/g, '').replace(/[^0-9+]/g, '');
+}
+
 function changerTelephone(val) {
   if (!currentChantier) return;
   currentChantier.telephone = val.trim();
   saveChantiers();
   syncChantier(currentChantier);
+  // Sans re-rendu, le bouton d'appel gardait l'ancien numéro — ou
+  // n'apparaissait pas du tout s'il n'y en avait pas avant. L'ouvrier
+  // appelait alors le mauvais numéro depuis le portail.
+  render();
   const n = document.getElementById('tel-note');
   if (n) { n.textContent = '✓ Enregistré'; setTimeout(() => { if (n) n.textContent = ''; }, 1500); }
 }
@@ -1497,12 +1532,19 @@ function dateLisible(iso) {
   return JOURS[(d.getDay() + 6) % 7] + ' ' + d.getDate() + ' ' + MOIS[d.getMonth()];
 }
 
-function quitterFiche() {
+// Toute sortie d'une fiche doit passer par ici, pas seulement le bouton
+// Retour : ouvrir un passage de l'historique ou toucher un onglet
+// quittait la fiche sans rien envoyer, et la synchro suivante remplaçait
+// les notes tapées par la version du serveur.
+function sauverFicheCourante() {
+  if (!currentChantier) return;
   saveNotesDraft();
-  // Les notes ne partaient nulle part tant que le chantier n'était pas
-  // clôturé : dès la fiche refermée, la synchro suivante les remplaçait
-  // par la version du serveur. On les envoie en quittant.
-  if (currentChantier && currentChantier.notes !== notesInitiales) syncChantier(currentChantier);
+  if (currentChantier.notes !== notesInitiales) syncChantier(currentChantier);
+  notesInitiales = currentChantier.notes || '';
+}
+
+function quitterFiche() {
+  sauverFicheCourante();
   currentChantier = null;
   render();
 }
@@ -1529,9 +1571,8 @@ function basculerAssignation(id, actif) {
 
 // Matériel : c'est le patron qui décide ce que le camion emporte. Les
 // ouvriers le lisent, sans pouvoir le changer une fois partis.
-function basculerMateriel(i, actif) {
+function basculerMateriel(nom, actif) {
   if (!currentChantier) return;
-  const nom = MATERIEL[i];
   const liste = currentChantier.materiel = currentChantier.materiel || [];
   const p = liste.indexOf(nom);
   if (actif && p === -1) liste.push(nom);
@@ -1546,8 +1587,7 @@ function basculerMateriel(i, actif) {
   }
 }
 
-function basculerMaterielNouveau(i, actif) {
-  const nom = MATERIEL[i];
+function basculerMaterielNouveau(nom, actif) {
   const p = materielNouveau.indexOf(nom);
   if (actif && p === -1) materielNouveau.push(nom);
   else if (!actif && p > -1) materielNouveau.splice(p, 1);
@@ -2007,9 +2047,24 @@ const ENTREPRISE = {
   legal: 'SAS au capital de 1 000 € · RCS Pontoise 928 522 325 · TVA FR42928522325'
 };
 
+// Le document imprimable est vidé dès que l'impression est terminée.
+// La règle @media print ne dépend pas du bouton : laissé en place, le
+// dernier compte-rendu ressortirait à la prochaine impression déclenchée
+// par le navigateur — Partager → Imprimer sur une autre fiche, et c'est
+// le nom, l'adresse, le téléphone et les photos d'un autre client qui
+// sortent sur la feuille remise à celui-ci.
+function viderCompteRendu() {
+  const cr = document.getElementById('cr');
+  if (cr) cr.innerHTML = '';
+}
+window.addEventListener('afterprint', viderCompteRendu);
+
+let impressionEnCours = false;
+
 async function imprimerCompteRendu() {
   const ch = currentChantier;
-  if (!ch) return;
+  if (!ch || impressionEnCours) return;   // un double appui ouvrait deux dialogues
+  impressionEnCours = true;
 
   const btn = document.getElementById('btn-cr');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Préparation…'; }
@@ -2018,9 +2073,20 @@ async function imprimerCompteRendu() {
   // avoir toutes avant d'ouvrir la fenêtre d'impression, sinon la page
   // part avec des cadres vides.
   const srcs = [];
+  let manquantes = 0;
   for (const ph of (ch.photos || [])) {
     const src = await photoSrc(ph);
-    if (src) srcs.push(src);
+    if (src) srcs.push(src); else manquantes++;
+  }
+
+  // Sans réseau, une photo jamais consultée sur cet appareil ne peut pas
+  // être récupérée. Mieux vaut le dire que sortir un compte-rendu
+  // amputé sans que personne ne s'en aperçoive.
+  if (manquantes && !confirm(manquantes + ' photo(s) n\'ont pas pu être chargées ' +
+      '(pas de réseau ?).\n\nImprimer quand même le compte-rendu sans elles ?')) {
+    impressionEnCours = false;
+    if (btn) { btn.disabled = false; btn.textContent = '🖨 Compte-rendu pour le client'; }
+    return;
   }
 
   const ligne = (label, valeur) => valeur
@@ -2068,11 +2134,16 @@ async function imprimerCompteRendu() {
         '<div>Nos réalisations</div></div>' +
     '</div>';
 
-  if (btn) { btn.disabled = false; btn.textContent = '🖨 Compte-rendu pour le client'; }
-
   // Laisse au navigateur le temps de décoder les images avant d'ouvrir
   // la fenêtre d'impression.
-  setTimeout(() => window.print(), 350);
+  setTimeout(() => {
+    window.print();
+    if (btn) { btn.disabled = false; btn.textContent = '🖨 Compte-rendu pour le client'; }
+    impressionEnCours = false;
+    // Filet si le navigateur n'émet pas « afterprint » — Safari iOS ne
+    // le fait pas systématiquement.
+    setTimeout(viderCompteRendu, 4000);
+  }, 350);
 }
 
 // ============================================================
@@ -2114,9 +2185,22 @@ let planningVue = 'semaine';
 let moisRef = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
 let anneeRef = new Date().getFullYear();
 
+// Les deux repères se suivent : avancer jusqu'en mars 2027 en vue Mois
+// puis passer en Année affichait 2026, et la navigation se contredisait
+// d'une vue à l'autre.
 function setVue(v) { planningVue = v; render(); }
-function changerMois(n)  { moisRef = new Date(moisRef.getFullYear(), moisRef.getMonth() + n, 1); render(); }
-function changerAnnee(n) { anneeRef += n; render(); }
+
+function changerMois(n) {
+  moisRef = new Date(moisRef.getFullYear(), moisRef.getMonth() + n, 1);
+  anneeRef = moisRef.getFullYear();
+  render();
+}
+
+function changerAnnee(n) {
+  anneeRef += n;
+  moisRef = new Date(anneeRef, moisRef.getMonth(), 1);
+  render();
+}
 
 // Combien de semaines séparent une date de la semaine en cours. Le
 // Math.round absorbe l'heure gagnée ou perdue au changement d'heure,
@@ -2350,7 +2434,11 @@ function renderPlanning(c) {
 // ⚠ Chez Supabase, la suppression est définitive. Pas de corbeille.
 
 function csvCellule(v) {
-  const t = (v === null || v === undefined) ? '' : String(v);
+  let t = (v === null || v === undefined) ? '' : String(v);
+  // Excel interprète une cellule commençant par = + - @ comme une
+  // formule. Une note terrain « -RAS, tout est ok » casserait la colonne
+  // ou déclencherait un avertissement de sécurité à l'ouverture.
+  if (/^[=+\-@]/.test(t)) t = "'" + t;
   return '"' + t.replace(/"/g, '""') + '"';
 }
 
@@ -2381,24 +2469,44 @@ function exporterCsv() {
 
 // Suppression par lots : un appel par fichier serait interminable sur
 // plusieurs centaines de photos.
+//
+// Renvoie l'ensemble des chemins RÉELLEMENT supprimés, tel que le
+// serveur les rapporte. Se fier au seul code HTTP ne suffit pas :
+// l'API renvoie 200 avec la liste des objets traités même lorsque les
+// règles d'accès en ont écarté une partie. Vider les fiches sur cette
+// base rendrait les fichiers restants inatteignables — plus aucun
+// chemin ne pointerait dessus, et ils continueraient d'occuper l'espace.
 async function supprimerFichiers(chemins) {
-  let faits = 0;
+  const faits = new Set();
   for (let i = 0; i < chemins.length; i += 100) {
     const lot = chemins.slice(i, i + 100);
-    const res = await sb('/storage/v1/object/' + BUCKET, {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prefixes: lot })
-    });
-    if (res.ok) faits += lot.length;
+    try {
+      const res = await sb('/storage/v1/object/' + BUCKET, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prefixes: lot })
+      });
+      if (!res.ok) continue;
+      const rep = await res.json().catch(() => null);
+      if (Array.isArray(rep)) rep.forEach(o => { if (o && o.name) faits.add(o.name); });
+      else lot.forEach(x => faits.add(x));   // réponse inattendue : on fait confiance au 200
+    } catch (e) { /* lot suivant */ }
   }
   return faits;
 }
 
 function moisDepuis(ch) {
-  // date_termine est au format jj/mm/aaaa ; maj_le sert de repli.
+  // date_termine est au format jj/mm/aaaa. En repli on prend la date de
+  // création, jamais maj_le : un déclencheur la remet à l'instant présent
+  // à chaque modification, si bien qu'un chantier vieux de trois ans dont
+  // on a touché l'affectation le mois dernier n'aurait jamais été purgé.
   const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(ch.dateTermine || '');
-  const d = m ? new Date(+m[3], +m[2] - 1, +m[1]) : (ch.majLe ? new Date(ch.majLe) : null);
+  let d = m ? new Date(+m[3], +m[2] - 1, +m[1]) : null;
+  if (!d && ch.date) {
+    const j = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ch.date);
+    if (j) d = new Date(+j[1], +j[2] - 1, +j[3]);
+  }
+  if (!d && ch.creeLe) d = new Date(ch.creeLe);
   if (!d || isNaN(d)) return null;
   return (Date.now() - d.getTime()) / (1000 * 60 * 60 * 24 * 30.44);
 }
@@ -2423,20 +2531,28 @@ async function purgerPhotos() {
 
   const btn = document.getElementById('btn-purge');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Suppression…'; }
+  menageEnCours = true;
   try {
-    await supprimerFichiers(chemins);
-    // On vide la liste côté base après coup : si l'app s'interrompt
-    // entre les deux, on garde des références vers des fichiers absents
-    // plutôt que des fichiers que plus rien ne référence.
+    const faits = await supprimerFichiers(chemins);
+
+    // On ne retire de la fiche que ce qui a réellement disparu du
+    // serveur. Les photos qu'il a refusé de supprimer restent
+    // référencées, donc visibles et re-supprimables.
     for (const ch of cibles) {
-      await patchChantier(ch.id, { photos: [] });
-      ch.photos = []; ch.nbPhotos = 0;
+      const reste = (ch.photos || []).filter(p => !faits.has(p.path));
+      if (reste.length === (ch.photos || []).length) continue;
+      await patchChantier(ch.id, { photos: reste });
+      ch.photos = reste; ch.nbPhotos = reste.length;
     }
     saveChantiers();
-    alert(chemins.length + ' photo(s) supprimée(s). Les fiches sont intactes.');
+
+    const rates = chemins.length - faits.size;
+    alert(faits.size + ' photo(s) supprimée(s). Les fiches sont intactes.' +
+      (rates ? '\n\n⚠ ' + rates + ' photo(s) n\'ont pas pu être supprimées. Relancez le ménage.' : ''));
   } catch (e) {
     alert('Suppression interrompue : ' + (e.message || e) + '\n\nRelancez pour reprendre.');
   }
+  menageEnCours = false;
   if (btn) { btn.disabled = false; btn.textContent = '🧹 Supprimer ces photos'; }
   render();
 }
@@ -2452,6 +2568,7 @@ async function remiseAZero() {
 
   const btn = document.getElementById('btn-raz');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Suppression…'; }
+  menageEnCours = true;
   try {
     const chemins = chantiers.flatMap(ch =>
       (ch.photos || []).map(p => p.path).concat([ch.devisPath]).filter(Boolean));
@@ -2463,12 +2580,17 @@ async function remiseAZero() {
     localStorage.removeItem('jardinator_chantiers');
     localStorage.removeItem('jardinator_queue');
     localStorage.removeItem('jardinator_rejets');
+    // Les vignettes restaient sur l'appareil après une « remise à zéro
+    // complète », occupant l'espace sans que rien n'y renvoie.
+    try { indexedDB.deleteDatabase('jardinator'); _db = null; } catch (e) {}
     saveChantiers();
     alert('Base remise à zéro.');
   } catch (e) {
     alert('Suppression interrompue : ' + (e.message || e) + '\n\nRelancez pour reprendre.');
   }
+  menageEnCours = false;
   if (btn) { btn.disabled = false; btn.textContent = '⚠️ Remise à zéro complète'; }
+  updateQueueBanner();   // le bandeau d'attente restait affiché
   render();
 }
 
