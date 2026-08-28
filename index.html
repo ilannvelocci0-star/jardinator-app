@@ -362,6 +362,28 @@ function versDb(ch) {
 
 function todayFr() { return new Date().toLocaleDateString('fr-FR'); }
 
+// Safari sur iPhone ne repeint pas toujours quand on détruit, dans le
+// gestionnaire du clic, l'élément qui vient d'être touché : l'écran
+// reste blanc jusqu'au contact suivant, alors que l'état est correct.
+// On lâche le focus, on sort du gestionnaire, et on force un
+// recalcul de couche après reconstruction.
+//
+// Volontairement sans requestAnimationFrame : il ne se déclenche jamais
+// quand la page est masquée. Un écran qui se verrouille au moment du
+// clic laisserait l'action en suspens — le chantier créé mais le
+// formulaire toujours à l'écran, prêt à être validé une seconde fois.
+function apresClic(action) {
+  const actif = document.activeElement;
+  if (actif && actif.blur) actif.blur();
+  setTimeout(() => {
+    action();
+    const c = document.getElementById('content');
+    if (!c) return;
+    c.style.transform = 'translateZ(0)';
+    setTimeout(() => { c.style.transform = ''; }, 0);
+  }, 0);
+}
+
 function nouvelleCle(prefixe) {
   return prefixe + '-' + Date.now() + '-' + Math.floor(Math.random() * 100000);
 }
@@ -437,7 +459,26 @@ function choisirFichiers(accept, multiple) {
     inp.multiple = !!multiple;
     // Pas d'attribut « capture » : iOS propose alors Appareil photo OU
     // Photothèque. Le forcer priverait l'ouvrier de ses photos déjà prises.
-    inp.onchange = () => res(Array.from(inp.files || []));
+    inp.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px;opacity:0';
+
+    // L'élément doit être DANS le document. Détaché, Safari peut le
+    // recycler avant que l'événement n'arrive — et la photo est alors
+    // perdue sans message. Ouvrir l'appareil photo met justement le
+    // navigateur sous pression mémoire, ce qui rend le cas fréquent.
+    document.body.appendChild(inp);
+
+    let fini = false;
+    const rendre = (fichiers) => {
+      if (fini) return;
+      fini = true;
+      setTimeout(() => { if (inp.parentNode) inp.parentNode.removeChild(inp); }, 0);
+      res(fichiers);
+    };
+
+    inp.addEventListener('change', () => rendre(Array.from(inp.files || [])));
+    // Annulation : sans ça, l'attente ne se terminait jamais et le bouton
+    // photo restait inerte jusqu'au rechargement de l'application.
+    inp.addEventListener('cancel', () => rendre([]));
     inp.click();
   });
 }
@@ -1163,7 +1204,7 @@ function renderDetail(c) {
   const enAttente = pendingIds().has(ch.id);
 
   c.innerHTML =
-    '<div class="back-btn" onclick="quitterFiche()">← Retour</div>' +
+    '<div class="back-btn" onclick="apresClic(quitterFiche)">← Retour</div>' +
     '<div class="id-badge">' + esc(ch.id) + '</div>' +
     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">' +
       '<div style="font-size:22px;font-weight:700;color:var(--noir)">' + esc(ch.client) + '</div>' + badgeHtml(ch.statut) +
@@ -1300,7 +1341,7 @@ async function supprimerChantier() {
   saveChantiers();
   enqueue({ type: 'delete', id: ch.id });
   currentChantier = null;
-  render();
+  apresClic(render);
 }
 
 // ============================================================
@@ -1517,7 +1558,7 @@ function showModal() {
       '✓ Notes sauvegardées<br>' +
       '<span id="sync-line">⏳ Envoi au serveur…</span>' +
     '</div>' +
-    '<button class="btn btn-black" onclick="closeModal();currentChantier=null;render()">Retour à la liste</button>' +
+    '<button class="btn btn-black" onclick="closeModal();currentChantier=null;apresClic(render)">Retour à la liste</button>' +
   '</div>';
 
   // Fermer en tapant à côté doit ramener à la liste comme le bouton :
@@ -1640,7 +1681,7 @@ function annulerNouveau() {
   photosNouveau = [];
   devisNouveau = null;
   assignesNouveau = [];
-  switchTab('chantiers');
+  apresClic(() => switchTab('chantiers'));
 }
 
 function creerChantier() {
@@ -1677,7 +1718,7 @@ function creerChantier() {
   photosNouveau = [];
   devisNouveau = null;
   assignesNouveau = [];
-  switchTab('chantiers');
+  apresClic(() => switchTab('chantiers'));
 }
 
 // ============================================================

@@ -2,7 +2,7 @@
 // index.html : la page elle-même est servie réseau d'abord, donc elle se
 // met à jour seule, mais le logo, les icônes et le manifeste sont servis
 // depuis le cache. Changer cette valeur purge tout d'un coup.
-const CACHE_VERSION = 'v5';
+const CACHE_VERSION = 'v6';
 const CACHE_NAME = 'jardinator-' + CACHE_VERSION;
 
 // Chemins relatifs : le SW est servi depuis la racine de l'app, donc
