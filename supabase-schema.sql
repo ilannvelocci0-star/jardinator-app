@@ -41,6 +41,16 @@ create table if not exists public.chantiers (
 alter table public.chantiers
   add column if not exists assignes uuid[] not null default '{}';
 
+-- Les règles de sécurité sont recréées plus bas, mais il faut les
+-- retirer DÈS MAINTENANT : celles de la version précédente référencent
+-- assigne_a, et PostgreSQL refuse de supprimer une colonne dont dépend
+-- une policy.
+drop policy if exists "chantiers authentifies" on public.chantiers;
+drop policy if exists "chantiers lecture"      on public.chantiers;
+drop policy if exists "chantiers creation"     on public.chantiers;
+drop policy if exists "chantiers modification" on public.chantiers;
+drop policy if exists "chantiers suppression"  on public.chantiers;
+
 -- Reprise de l'ancienne colonne « un seul ouvrier », si elle existe.
 do $$
 begin
