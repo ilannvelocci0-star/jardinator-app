@@ -1308,6 +1308,13 @@ function renderList(c) {
         ? '<div style="font-size:12px;color:' + ((ch.assignes || []).length ? 'var(--blue)' : '#c0392b') + ';margin-bottom:6px">' +
           ((ch.assignes || []).length ? '👷 ' + esc(nomsDe(ch.assignes)) : '⚠ Personne assigné') + '</div>'
         : '') +
+      // Visible des deux rôles : c'est ce qu'on charge dans le camion
+      // avant de partir, on ne devrait pas avoir à ouvrir la fiche pour
+      // le savoir.
+      ((ch.materiel || []).length
+        ? '<div style="font-size:12px;color:var(--amber);margin-bottom:6px">🧰 ' +
+          esc(ch.materiel.join(', ')) + '</div>'
+        : '') +
       '<div style="display:flex;justify-content:space-between;align-items:center">' +
         '<span style="font-size:12px;color:#999">' + esc(ch.id) + ' · ' + esc(ch.date) +
         (pending.has(ch.id) ? ' · ⏳' : '') + '</span>' +
