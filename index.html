@@ -1170,7 +1170,6 @@ function nomsDe(ids) {
 
 // Sélection en cours dans le formulaire de création (le chantier
 // n'existe pas encore, donc pas de fiche où stocker).
-let assignesNouveau = [];
 let materielNouveau = [];
 
 // Matériel embarqué. L'ordre suit celui du dépôt, pas l'alphabet :
@@ -1214,7 +1213,9 @@ function casesMateriel(selection, action) {
   // données.
   (selection || []).forEach(m => { if (connus.indexOf(m) === -1) connus.push(m); });
   return casesACocher(
-    connus.map(m => ({ cle: m, val: JSON.stringify(m), nom: m })),
+    // esc() indispensable : sans lui les guillemets de JSON.stringify
+    // ferment l'attribut onchange au milieu, et cocher ne fait plus rien.
+    connus.map(m => ({ cle: m, val: esc(JSON.stringify(m)), nom: m })),
     selection, action, '');
 }
 
@@ -1594,14 +1595,6 @@ function basculerMaterielNouveau(nom, actif) {
   saveNouveauDraft();
 }
 
-// Même chose dans le formulaire de création, avant que la fiche existe.
-function basculerAssignationNouveau(id, actif) {
-  const i = assignesNouveau.indexOf(id);
-  if (actif && i === -1) assignesNouveau.push(id);
-  else if (!actif && i > -1) assignesNouveau.splice(i, 1);
-  saveNouveauDraft();
-}
-
 // Sauvegarde à la frappe. Sans ça, tout ce qui est tapé ne vit que dans
 // le DOM : mise en veille du téléphone, appel entrant ou changement
 // d'app suffisent à faire recharger la PWA et à tout perdre.
@@ -1901,7 +1894,6 @@ function renderNouveau(c) {
   if (Array.isArray(d.__photos)) photosNouveau = d.__photos;
   if (d.__devis) devisNouveau = d.__devis;
   if (Array.isArray(d.__materiel)) materielNouveau = d.__materiel;
-  if (Array.isArray(d.__assignes)) assignesNouveau = d.__assignes;
   const enCours = d['n-statut'] === 'En cours';
 
   c.innerHTML =
@@ -1930,8 +1922,6 @@ function renderNouveau(c) {
       '</select></div>' +
     '<div class="field-group"><div class="field-label">🧰 Matériel à emporter</div>' +
       casesMateriel(materielNouveau, 'basculerMaterielNouveau') + '</div>' +
-    '<div class="field-group"><div class="field-label">👷 Assigner à</div>' +
-      casesOuvriers(assignesNouveau, 'basculerAssignationNouveau') + '</div>' +
     '<div class="field-group"><div class="field-label">📄 Devis</div>' +
       (devisNouveau
         ? '<div class="file-chip"><span style="font-size:20px">📄</span>' +
@@ -1962,7 +1952,6 @@ function saveNouveauDraft() {
   d.__photos = photosNouveau;
   d.__devis = devisNouveau;
   d.__materiel = materielNouveau;
-  d.__assignes = assignesNouveau;
   localStorage.setItem(DRAFT_KEY, JSON.stringify(d));
   clearTimeout(nouveauTimer);
   nouveauTimer = setTimeout(() => {
@@ -1983,7 +1972,6 @@ function annulerNouveau() {
   if (devisNouveau) fichierDel(devisNouveau.cle);
   photosNouveau = [];
   devisNouveau = null;
-  assignesNouveau = [];
   materielNouveau = [];
   apresClic(() => switchTab('chantiers'));
 }
@@ -2003,7 +1991,9 @@ function creerChantier() {
     devisCle: devisNouveau ? devisNouveau.cle : null,
     consignes: document.getElementById('n-consignes').value,
     notes: '',
-    assignes: assignesNouveau.slice(),
+    // Personne n'est assigné à la création : l'organisation se décide
+    // après coup, depuis la fiche. Remplir d'abord, répartir ensuite.
+    assignes: [],
     materiel: materielNouveau.slice(),
     photos: photosNouveau.slice(),
     nbPhotos: photosNouveau.length,
@@ -2023,7 +2013,6 @@ function creerChantier() {
 
   photosNouveau = [];
   devisNouveau = null;
-  assignesNouveau = [];
   materielNouveau = [];
   apresClic(() => switchTab('chantiers'));
 }

@@ -45,6 +45,9 @@ n'importe qui ayant l'URL du dépôt. Tout est dans
 Le modèle de droits tient en deux lignes :
 
 - **Patron** (`app_metadata.role = 'patron'`) : voit tout, crée, supprime, assigne.
+  L'affectation ne se fait **pas** à la création — le formulaire ne la
+  propose plus — mais depuis la fiche, une fois le chantier enregistré.
+  On remplit d'abord, on répartit ensuite, quand l'organisation est faite.
 - **Ouvrier** : ne voit que les chantiers où son `uid` est dans le tableau
   `assignes`. Peut modifier notes, statut et photos de ses chantiers.
   Ne peut ni créer ni supprimer de fiche, ni changer le matériel.
@@ -277,6 +280,13 @@ Les trois zones où ça se joue à chaque fois, dans ce projet :
    écarte une partie d'un lot, PATCH sans `return=representation`.
 3. **Un état global qui survit à l'écran qui l'a créé** — le `#cr` du
    compte-rendu en est l'exemple type.
+
+Un quatrième, plus bête et tout aussi coûteux : **une valeur interpolée
+dans un attribut HTML sans passer par `esc()`**. `casesACecher()` place
+sa valeur dans un `onchange="…"` ; un `JSON.stringify` non échappé y a
+fermé l'attribut au milieu et cassé toutes les cases à cocher du
+matériel. Ça ne lève aucune erreur en console : le gestionnaire n'existe
+simplement pas, et cliquer ne fait rien.
 
 ## Si ça casse
 
